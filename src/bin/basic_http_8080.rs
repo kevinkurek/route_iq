@@ -12,7 +12,7 @@ fn main() -> std::io::Result<()> {
         let mut buffer = [0_u8; 1024];
         let _ = stream.read(&mut buffer)?;
 
-        let body = "Hello from route_iq binary on :8080 without proxy\n";
+        let body = "Hello from route_iq binary on :8080\n";
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n{}",
             body.len(),
