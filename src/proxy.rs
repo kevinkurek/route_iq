@@ -34,16 +34,76 @@
 // only works if service function is clonable
 // let make_service = Shared::new(service_fn(handle));
 
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
 use hyper::{Body, 
             Client, 
             Request, 
-            Response};
+            Response, StatusCode};
+
+use crate::load_balancing::{Backend, HttpHealthCheck, LoadBalancingStrategy, refresh_health};
+
+pub struct AppState<B: LoadBalancingStrategy> {
+    pub backends: Mutex<Vec<Backend>>,
+    pub balancer: B,
+    pub checker: HttpHealthCheck,
+    pub client: Client<hyper::client::HttpConnector>
+}
+
+impl<B: LoadBalancingStrategy> AppState<B> {
+    pub fn new(balancer: B) -> Self {
+        Self { backends: Mutex::new(vec![
+            Backend {id: "a".into(), active_connections: 0, healthy: true},
+            Backend {id: "b".into(), active_connections: 0, healthy: true},
+        ]), 
+        balancer, 
+        checker: HttpHealthCheck, 
+        client: Client::new() 
+    }
+    }
+}
 
 // handle requests
-pub async fn handle(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+pub async fn handle<B: LoadBalancingStrategy>(
+    req: Request<Body>,
+    state: Arc<AppState<B>>,
+) -> Result<Response<Body>, hyper::Error> {
     // Ok(Response::new(Body::from("Hello from HTTP proxy")))
 
-    // hyper::Client sends request to backend 8080 server
-    let client = Client::new();
-    client.request(req).await
+    let selected_backend_id = {
+        let mut backends = state.backends.lock().await;
+        
+        // perform health checks
+        refresh_health(&state.checker, &mut backends).await;
+
+        match state.balancer.pick_backend(&backends) {
+            Some(i) => {
+
+                // increment the connection before you send request
+                backends[i].active_connections += 1;
+                backends[i].id.clone()
+            }
+            None => {
+                let mut resp = Response::new(Body::from("No healthy backend"));
+                *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+                return Ok(resp)
+            }
+        } 
+    };
+    println!("Selected backend: {}", selected_backend_id);
+
+    // For now this still forwards original request unchanged.
+    // Later, rewrite URI based on selected backend.
+    let result = state.client.request(req).await;
+
+    {
+        // now we decrement the active connection because we sent the request and result
+        // has now returned, thus that connection is free
+        let mut backends = state.backends.lock().await;
+        if let Some(b) = backends.iter_mut().find(|b| b.id == selected_backend_id) {
+            b.active_connections = b.active_connections.saturating_sub(1);
+        }
+    }
+    result
 }
