@@ -36,6 +36,7 @@
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hyper::{Body, 
             Client, 
@@ -54,8 +55,10 @@ pub struct AppState<B: LoadBalancingStrategy> {
 impl<B: LoadBalancingStrategy> AppState<B> {
     pub fn new(balancer: B) -> Self {
         Self { backends: Mutex::new(vec![
-            Backend {id: "a".into(), active_connections: 0, healthy: true},
-            Backend {id: "b".into(), active_connections: 0, healthy: true},
+            Backend {id: "a".into(), active_connections: AtomicU64::new(0), healthy: true},
+            Backend {id: "b".into(), active_connections: AtomicU64::new(0), healthy: true},
+            Backend {id: "c".into(), active_connections: AtomicU64::new(0), healthy: true},
+            Backend {id: "d".into(), active_connections: AtomicU64::new(0), healthy: true},
         ]), 
         balancer, 
         checker: HttpHealthCheck, 
@@ -81,7 +84,7 @@ pub async fn handle<B: LoadBalancingStrategy>(
             Some(i) => {
 
                 // increment the connection before you send request
-                backends[i].active_connections += 1;
+                backends[i].active_connections.fetch_add(1, Ordering::Relaxed);
                 backends[i].id.clone()
             }
             None => {
@@ -102,7 +105,7 @@ pub async fn handle<B: LoadBalancingStrategy>(
         // has now returned, thus that connection is free
         let mut backends = state.backends.lock().await;
         if let Some(b) = backends.iter_mut().find(|b| b.id == selected_backend_id) {
-            b.active_connections = b.active_connections.saturating_sub(1);
+            b.active_connections.fetch_sub(1, Ordering::Relaxed);
         }
     }
     result

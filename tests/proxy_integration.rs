@@ -4,9 +4,11 @@ use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 
 use hyper::{Body, Request, Response, Server, service::{make_service_fn, service_fn}};
 use route_iq::{
-    load_balancing::RoundRobin,
+    load_balancing::{LeastConnections, RoundRobin},
     proxy::{AppState, handle},
 };
+use std::sync::atomic::{Ordering};
+
 
 #[tokio::test]
 async fn proxy_forwards_request_and_releases_connection() {
@@ -50,7 +52,7 @@ async fn proxy_forwards_request_and_releases_connection() {
     // Confirm active connection counters were decremented back to zero
     // after request completion (no leaked "in-flight" connections).
     let backends = state.backends.lock().await;
-    assert!(backends.iter().all(|b| b.active_connections == 0));
+    assert!(backends.iter().all(|b| b.active_connections.load(Ordering::Relaxed) == 0));
 }
 
 #[tokio::test]
@@ -97,9 +99,9 @@ async fn proxy_round_robin_splits_in_flight_connections_across_backends() {
 
     {
         let backends = state.backends.lock().await;
-        assert_eq!(backends.len(), 2);
-        assert_eq!(backends[0].active_connections, 1);
-        assert_eq!(backends[1].active_connections, 1);
+        assert_eq!(backends.len(), 4);
+        assert_eq!(backends[0].active_connections.load(Ordering::Relaxed), 1);
+        assert_eq!(backends[1].active_connections.load(Ordering::Relaxed), 1);
     }
 
     let r1 = t1.await.unwrap().unwrap();
@@ -110,5 +112,79 @@ async fn proxy_round_robin_splits_in_flight_connections_across_backends() {
 
     // After completion, counters should return to zero.
     let backends = state.backends.lock().await;
-    assert!(backends.iter().all(|b| b.active_connections == 0));
+    assert!(backends.iter().all(|b| b.active_connections.load(Ordering::Relaxed) == 0));
+}
+
+#[tokio::test]
+async fn proxy_least_connections_prefers_lowest_in_flight_backends() {
+    use tokio::time::{sleep, Duration};
+
+    // Slow backend keeps requests in-flight long enough to inspect counters.
+    let backend_make = make_service_fn(|_| async {
+        Ok::<_, Infallible>(service_fn(|_req| async {
+            sleep(Duration::from_millis(200)).await;
+            Ok::<_, Infallible>(Response::new(Body::from("slow-backend-ok")))
+        }))
+    });
+
+    let backend = Server::bind(&SocketAddr::from(([127, 0, 0, 1], 0))).serve(backend_make);
+    let backend_addr = backend.local_addr();
+    tokio::spawn(backend);
+
+    let state = Arc::new(AppState::new(LeastConnections::new()));
+
+    // Seed baseline load so "a" is already busy and least-connections should prefer b/c first.
+    {
+        let backends = state.backends.lock().await;
+        backends[0].active_connections.store(5, Ordering::Relaxed); // a
+        backends[1].active_connections.store(0, Ordering::Relaxed); // b
+        backends[2].active_connections.store(0, Ordering::Relaxed); // c
+        backends[3].active_connections.store(0, Ordering::Relaxed); // d
+    }
+
+    let uri = format!("http://{}/lc", backend_addr);
+    let req1 = Request::builder()
+        .method("GET")
+        .uri(&uri)
+        .body(Body::empty())
+        .unwrap();
+
+    let req2 = Request::builder()
+        .method("GET")
+        .uri(&uri)
+        .body(Body::empty())
+        .unwrap();
+
+    let s1 = Arc::clone(&state);
+    let s2 = Arc::clone(&state);
+
+    let t1 = tokio::spawn(async move { handle(req1, s1).await });
+    let t2 = tokio::spawn(async move { handle(req2, s2).await });
+
+    // Allow selection + increment to happen.
+    sleep(Duration::from_millis(50)).await;
+
+    {
+        let backends = state.backends.lock().await;
+        assert_eq!(backends.len(), 4);
+
+        // a remains at baseline load; b and c become in-flight first.
+        assert_eq!(backends[0].active_connections.load(Ordering::Relaxed), 5);
+        assert_eq!(backends[1].active_connections.load(Ordering::Relaxed), 1);
+        assert_eq!(backends[2].active_connections.load(Ordering::Relaxed), 1);
+        assert_eq!(backends[3].active_connections.load(Ordering::Relaxed), 0);
+    }
+
+    let r1 = t1.await.unwrap().unwrap();
+    let r2 = t2.await.unwrap().unwrap();
+
+    assert_eq!(r1.status(), hyper::StatusCode::OK);
+    assert_eq!(r2.status(), hyper::StatusCode::OK);
+
+    // After both complete, counters return to seeded baseline.
+    let backends = state.backends.lock().await;
+    assert_eq!(backends[0].active_connections.load(Ordering::Relaxed), 5);
+    assert_eq!(backends[1].active_connections.load(Ordering::Relaxed), 0);
+    assert_eq!(backends[2].active_connections.load(Ordering::Relaxed), 0);
+    assert_eq!(backends[3].active_connections.load(Ordering::Relaxed), 0);
 }
