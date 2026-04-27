@@ -137,8 +137,8 @@ async fn proxy_least_connections_prefers_lowest_in_flight_backends() {
     {
         let backends = state.backends.lock().await;
         backends[0].active_connections.store(5, Ordering::Relaxed); // a
-        backends[1].active_connections.store(0, Ordering::Relaxed); // b
-        backends[2].active_connections.store(0, Ordering::Relaxed); // c
+        backends[1].active_connections.store(2, Ordering::Relaxed); // b
+        backends[2].active_connections.store(1, Ordering::Relaxed); // c
         backends[3].active_connections.store(0, Ordering::Relaxed); // d
     }
 
@@ -158,7 +158,10 @@ async fn proxy_least_connections_prefers_lowest_in_flight_backends() {
     let s1 = Arc::clone(&state);
     let s2 = Arc::clone(&state);
 
+    // with request connections become: 5, 2, 1, 1
     let t1 = tokio::spawn(async move { handle(req1, s1).await });
+
+    // with request connections become: 5, 2, 2, 1
     let t2 = tokio::spawn(async move { handle(req2, s2).await });
 
     // Allow selection + increment to happen.
@@ -168,11 +171,11 @@ async fn proxy_least_connections_prefers_lowest_in_flight_backends() {
         let backends = state.backends.lock().await;
         assert_eq!(backends.len(), 4);
 
-        // a remains at baseline load; b and c become in-flight first.
+        // a remains at baseline load; c and d become in-flight first and add 1 connection
         assert_eq!(backends[0].active_connections.load(Ordering::Relaxed), 5);
-        assert_eq!(backends[1].active_connections.load(Ordering::Relaxed), 1);
-        assert_eq!(backends[2].active_connections.load(Ordering::Relaxed), 1);
-        assert_eq!(backends[3].active_connections.load(Ordering::Relaxed), 0);
+        assert_eq!(backends[1].active_connections.load(Ordering::Relaxed), 2);
+        assert_eq!(backends[2].active_connections.load(Ordering::Relaxed), 2);
+        assert_eq!(backends[3].active_connections.load(Ordering::Relaxed), 1);
     }
 
     let r1 = t1.await.unwrap().unwrap();
@@ -184,7 +187,7 @@ async fn proxy_least_connections_prefers_lowest_in_flight_backends() {
     // After both complete, counters return to seeded baseline.
     let backends = state.backends.lock().await;
     assert_eq!(backends[0].active_connections.load(Ordering::Relaxed), 5);
-    assert_eq!(backends[1].active_connections.load(Ordering::Relaxed), 0);
-    assert_eq!(backends[2].active_connections.load(Ordering::Relaxed), 0);
+    assert_eq!(backends[1].active_connections.load(Ordering::Relaxed), 2);
+    assert_eq!(backends[2].active_connections.load(Ordering::Relaxed), 1);
     assert_eq!(backends[3].active_connections.load(Ordering::Relaxed), 0);
 }
