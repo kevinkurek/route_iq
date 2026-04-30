@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
 
 // Backend Server Structure
 pub struct Backend {
+    pub addr: String,
     pub id: String,
     pub active_connections: AtomicU64,
     pub healthy: bool,
@@ -129,10 +130,10 @@ mod tests {
     fn round_robin_picks_healthy_backends_only() {
         let rr = RoundRobin::new();
         let backends = vec![
-            Backend {id: "a".into(), active_connections: AtomicU64::new(2), healthy: true},
-            Backend {id: "b".into(), active_connections: AtomicU64::new(3), healthy: false},
-            Backend {id: "c".into(), active_connections: AtomicU64::new(10), healthy: true},
-            Backend {id: "d".into(), active_connections: AtomicU64::new(10), healthy: true},
+            Backend {addr: "http://127.0.0.1:8080".to_owned(), id: "a".into(), active_connections: AtomicU64::new(2), healthy: true},
+            Backend {addr: "http://127.0.0.1:8081".to_owned(), id: "b".into(), active_connections: AtomicU64::new(3), healthy: false},
+            Backend {addr: "http://127.0.0.1:8082".to_owned(), id: "c".into(), active_connections: AtomicU64::new(10), healthy: true},
+            Backend {addr: "http://127.0.0.1:8083".to_owned(), id: "d".into(), active_connections: AtomicU64::new(10), healthy: true},
         ];
 
         let mut picks = vec![];
@@ -148,10 +149,10 @@ mod tests {
     #[tokio::test]
     async fn check_health_statuses() {
         let mut backends = vec![
-            Backend {id: "a".into(), active_connections: AtomicU64::new(2), healthy: true},
-            Backend {id: "b".into(), active_connections: AtomicU64::new(3), healthy: false},
-            Backend {id: "c".into(), active_connections: AtomicU64::new(10), healthy: true},
-            Backend {id: "d".into(), active_connections: AtomicU64::new(10), healthy: true},
+            Backend {addr: "http://127.0.0.1:8080".to_owned(), id: "a".into(), active_connections: AtomicU64::new(2), healthy: true},
+            Backend {addr: "http://127.0.0.1:8081".to_owned(), id: "b".into(), active_connections: AtomicU64::new(3), healthy: false},
+            Backend {addr: "http://127.0.0.1:8082".to_owned(), id: "c".into(), active_connections: AtomicU64::new(10), healthy: true},
+            Backend {addr: "http://127.0.0.1:8083".to_owned(), id: "d".into(), active_connections: AtomicU64::new(10), healthy: true},
         ];
 
         let checker = HttpHealthCheck;
@@ -162,17 +163,14 @@ mod tests {
     fn least_connections_picks_server_with_smallest_connections() {
         let lc = LeastConnections::new();
         let backends = vec![
-            Backend {id: "a".into(), active_connections: AtomicU64::new(2), healthy: true},
-            Backend {id: "b".into(), active_connections: AtomicU64::new(3), healthy: false},
-            Backend {id: "c".into(), active_connections: AtomicU64::new(10), healthy: true},
-            Backend {id: "d".into(), active_connections: AtomicU64::new(7), healthy: true},
-            Backend {id: "e".into(), active_connections: AtomicU64::new(1), healthy: true},
-            Backend {id: "f".into(), active_connections: AtomicU64::new(14), healthy: true},
-            Backend {id: "g".into(), active_connections: AtomicU64::new(13), healthy: true},
+            Backend {addr: "http://127.0.0.1:8080".to_owned(), id: "a".into(), active_connections: AtomicU64::new(2), healthy: true},
+            Backend {addr: "http://127.0.0.1:8081".to_owned(), id: "b".into(), active_connections: AtomicU64::new(3), healthy: false},
+            Backend {addr: "http://127.0.0.1:8082".to_owned(), id: "c".into(), active_connections: AtomicU64::new(10), healthy: true},
+            Backend {addr: "http://127.0.0.1:8083".to_owned(), id: "d".into(), active_connections: AtomicU64::new(10), healthy: true},
         ];
 
         let idx = lc.pick_backend(&backends).expect("should pick a backend");
         println!("Least Connections Backend Selected: {}", backends[idx].id);
-        assert_eq!(backends[idx].id, "e".to_string());
+        assert_eq!(backends[idx].id, "a".to_string());
     }
 }

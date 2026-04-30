@@ -4,10 +4,23 @@ use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 
 use hyper::{Body, Request, Response, Server, service::{make_service_fn, service_fn}};
 use route_iq::{
-    load_balancing::{LeastConnections, RoundRobin},
+    load_balancing::{Backend, LeastConnections, RoundRobin},
     proxy::{AppState, handle},
 };
-use std::sync::atomic::{Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// Build N backends all pointing at the same fake address. Lets a single in-test
+// server stand in for the whole pool while preserving per-index counter assertions.
+fn make_backends(n: usize, addr: SocketAddr) -> Vec<Backend> {
+    (0..n)
+        .map(|i| Backend {
+            addr: format!("http://{}", addr),
+            id: ((b'a' + i as u8) as char).to_string(),
+            active_connections: AtomicU64::new(0),
+            healthy: true,
+        })
+        .collect()
+}
 
 
 #[tokio::test]
@@ -28,8 +41,10 @@ async fn proxy_forwards_request_and_releases_connection() {
     tokio::spawn(backend);
 
     // Build proxy application state using RoundRobin load balancing.
-    // Same type of state real app uses
-    let state = Arc::new(AppState::new(RoundRobin::new()));
+    // Inject a single backend that points at the in-test fake server so
+    // forwarding stays self-contained (no dependency on ports 8080-8083).
+    let backends = make_backends(1, backend_addr);
+    let state = Arc::new(AppState::new(RoundRobin::new(), backends));
 
     // Create an HTTP request targeting the fake backend address.
     // The proxy handler will receive this request and forward it.
@@ -71,7 +86,10 @@ async fn proxy_round_robin_splits_in_flight_connections_across_backends() {
     let backend_addr = backend.local_addr();
     tokio::spawn(backend);
 
-    let state = Arc::new(AppState::new(RoundRobin::new()));
+    // Four backends all pointing at the same slow fake; round robin will
+    // rotate a -> b -> ... so per-index counters reflect distribution.
+    let backends = make_backends(4, backend_addr);
+    let state = Arc::new(AppState::new(RoundRobin::new(), backends));
 
     // Build two requests so round robin gets called twice.
     let uri = format!("http://{}/rr", backend_addr);
@@ -131,7 +149,10 @@ async fn proxy_least_connections_prefers_lowest_in_flight_backends() {
     let backend_addr = backend.local_addr();
     tokio::spawn(backend);
 
-    let state = Arc::new(AppState::new(LeastConnections::new()));
+    // Four backends all pointing at the same slow fake. We seed per-index
+    // baseline load below so the LC strategy has something to choose between.
+    let backends = make_backends(4, backend_addr);
+    let state = Arc::new(AppState::new(LeastConnections::new(), backends));
 
     // Seed baseline load so "a" is already busy and least-connections should prefer b/c first.
     {

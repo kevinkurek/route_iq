@@ -36,7 +36,7 @@
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
 use hyper::{Body, 
             Client, 
@@ -53,17 +53,13 @@ pub struct AppState<B: LoadBalancingStrategy> {
 }
 
 impl<B: LoadBalancingStrategy> AppState<B> {
-    pub fn new(balancer: B) -> Self {
-        Self { backends: Mutex::new(vec![
-            Backend {id: "a".into(), active_connections: AtomicU64::new(0), healthy: true},
-            Backend {id: "b".into(), active_connections: AtomicU64::new(0), healthy: true},
-            Backend {id: "c".into(), active_connections: AtomicU64::new(0), healthy: true},
-            Backend {id: "d".into(), active_connections: AtomicU64::new(0), healthy: true},
-        ]), 
-        balancer, 
-        checker: HttpHealthCheck, 
-        client: Client::new() 
-    }
+    pub fn new(balancer: B, backends: Vec<Backend>) -> Self {
+        Self {
+            backends: Mutex::new(backends),
+            balancer,
+            checker: HttpHealthCheck,
+            client: Client::new(),
+        }
     }
 }
 
@@ -74,7 +70,7 @@ pub async fn handle<B: LoadBalancingStrategy>(
 ) -> Result<Response<Body>, hyper::Error> {
     // Ok(Response::new(Body::from("Hello from HTTP proxy")))
 
-    let selected_backend_id = {
+    let (selected_backend_addr, selected_backend_id) = {
         let mut backends = state.backends.lock().await;
         
         // perform health checks
@@ -85,7 +81,7 @@ pub async fn handle<B: LoadBalancingStrategy>(
 
                 // increment the connection before you send request
                 backends[i].active_connections.fetch_add(1, Ordering::Relaxed);
-                backends[i].id.clone()
+                (backends[i].addr.clone(), backends[i].id.clone())
             }
             None => {
                 let mut resp = Response::new(Body::from("No healthy backend"));
@@ -94,10 +90,24 @@ pub async fn handle<B: LoadBalancingStrategy>(
             }
         } 
     };
-    println!("Selected backend: {}", selected_backend_id);
+    
+    println!("Selected backend: {}", selected_backend_addr);
 
-    // For now this still forwards original request unchanged.
-    // Later, rewrite URI based on selected backend.
+    let path_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+
+    // update the req with the selected backend address & path query
+    let uri: hyper::Uri = format!("{}{}", selected_backend_addr, path_query)
+        .parse()
+        .expect("valid backend URI");
+
+    // shadow then make req mutable then send request
+    let mut req = req;
+    *req.uri_mut() = uri;
+
     let result = state.client.request(req).await;
 
     {

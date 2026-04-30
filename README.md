@@ -6,46 +6,64 @@ Current strategies:
 - Round Robin
 - Least Connections
 
-## Run The Proxy
+## Run The Stack
 
-Starts the proxy on `127.0.0.1:3000`.
+The proxy listens on `127.0.0.1:3000` and forwards to backends on `127.0.0.1:8080-8083`.
+
+### 1. Build the backend binary once
+
+```bash
+cargo build --bin backend
+```
+
+### 2. Start four backend instances
+
+The backend reads `PORT` from the environment (defaults to `8080`). Run four copies, each on a different port. Easiest is one terminal tab per backend. Background them all in a single shell:
+
+```bash
+cargo build --bin backend
+PORT=8080 ./target/debug/backend &
+PORT=8081 ./target/debug/backend &
+PORT=8082 ./target/debug/backend &
+PORT=8083 ./target/debug/backend &
+
+# kill with
+kill $(jobs -p)
+```
+
+(Use `jobs` to list, `kill %1 %2 %3 %4` to stop them.)
+
+### 3. Start the proxy
+
+In another terminal:
 
 ```bash
 cargo run --bin route_iq
 ```
 
-Then in another terminal start the backend server and test both direct and proxied requests.
+### 4. Send traffic
 
-This starts the standalone example server on `127.0.0.1:8080`.
-
-```bash
-cargo run --bin basic_http_8080
-```
-
-Test the backend directly:
+Hit a backend directly:
 
 ```bash
-curl -i http://127.0.0.1:8080
->>
-HTTP/1.1 200 OK
-Hello from route_iq binary on :8080
+curl -i http://127.0.0.1:8080/
 ```
 
-Test through the proxy (port 3000) to backend (port 8080):
+Hit the proxy — it rewrites the URI and forwards to one of the four backends per the active strategy:
 
 ```bash
-curl -i --proxy http://127.0.0.1:3000 http://127.0.0.1:8080/
->>
-HTTP/1.1 200 OK
-Hello from route_iq binary on :8080
+curl -i http://127.0.0.1:3000/hello
 ```
 
-Short `-x` equivalent:
+Watch the proxy terminal — `Selected backend: http://127.0.0.1:808X` logs which backend was chosen.
+
+### 5. Run the Postman collection from the terminal
 
 ```bash
-curl -i -x 127.0.0.1:3000 http://127.0.0.1:8080/
-
+postman collection run postman/collections/route_iq
 ```
+
+All proxy routes should return 200 once the four backends are running.
 
 ## Run Tests
 
