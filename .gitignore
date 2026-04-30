@@ -1,1 +1,8 @@
 /target
+
+# Claude Code working state (sessions, worktrees, etc.)
+/.claude/
+.claude/
+
+# macOS
+.DS_Store
