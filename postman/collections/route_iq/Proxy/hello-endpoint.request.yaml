@@ -1,0 +1,6 @@
+$kind: http-request
+name: Hello Endpoint
+method: GET
+url: 'http://{{proxy_host}}/hello'
+description: Proxy forwards to backend /hello path. Used in integration tests to verify end-to-end forwarding.
+order: 2000

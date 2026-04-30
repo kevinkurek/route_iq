@@ -1,0 +1,6 @@
+$kind: http-request
+name: Health Check
+method: GET
+url: 'http://{{backend_host}}/'
+description: 'Direct request to the backend server. Expected response: "Hello from route_iq binary on :8080"'
+order: 1000

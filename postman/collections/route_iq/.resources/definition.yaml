@@ -1,0 +1,23 @@
+$kind: collection
+name: route_iq
+description: >-
+  A Rust reverse-proxy with pluggable load balancing strategies (Round Robin & Least Connections).
+  The proxy runs on port 3000 and forwards requests to backend servers on port 8080.
+
+  ## Architecture
+  - Proxy: 127.0.0.1:3000 (hyper-based reverse proxy)
+  - Backend: 127.0.0.1:8080 (example backend server)
+
+  ## Load Balancing Strategies
+  - Round Robin (default): Distributes requests sequentially across healthy backends
+  - Least Connections: Routes to the backend with the fewest active connections
+
+  ## Middleware
+  - Logging: /api/* paths are logged as "API Path", all others as "Generic Path"
+variables:
+  - key: proxy_host
+    value: '127.0.0.1:3000'
+    description: The reverse proxy address
+  - key: backend_host
+    value: '127.0.0.1:8080'
+    description: The direct backend server address

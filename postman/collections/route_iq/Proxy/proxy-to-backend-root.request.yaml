@@ -1,0 +1,6 @@
+$kind: http-request
+name: Proxy to Backend Root
+method: GET
+url: 'http://{{backend_host}}/'
+description: Sends a request through the proxy to the backend root. Tests basic proxy forwarding.
+order: 1000

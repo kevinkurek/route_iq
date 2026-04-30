@@ -1,0 +1,15 @@
+$kind: http-request
+name: Switch Strategy to Round Robin
+method: POST
+url: 'http://{{proxy_host}}/admin/strategy'
+description: Planned endpoint to switch load balancing algorithm at runtime. Not yet implemented.
+order: 1000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "strategy": "round_robin"
+    }

@@ -1,0 +1,4 @@
+$kind: collection
+name: Backend (Direct)
+description: Requests sent directly to the backend server on port 8080, bypassing the proxy.
+order: 1000

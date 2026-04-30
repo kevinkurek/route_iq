@@ -1,0 +1,6 @@
+$kind: http-request
+name: API Path Example
+method: GET
+url: 'http://{{proxy_host}}/api/example'
+description: Example of an /api/* path. Middleware logs all /api/* paths separately.
+order: 2000

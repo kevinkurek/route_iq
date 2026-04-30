@@ -1,0 +1,4 @@
+$kind: collection
+name: Load Balancer Control (Planned)
+description: Planned endpoints to control the load balancer at runtime (see TODO in README).
+order: 4000

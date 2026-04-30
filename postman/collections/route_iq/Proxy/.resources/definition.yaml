@@ -1,0 +1,4 @@
+$kind: collection
+name: Proxy
+description: Requests sent through the reverse proxy on port 3000, which forwards to backend servers using the configured load balancing strategy.
+order: 2000

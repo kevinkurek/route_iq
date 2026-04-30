@@ -1,0 +1,6 @@
+$kind: http-request
+name: Least Connections Test
+method: GET
+url: 'http://{{proxy_host}}/lc'
+description: Triggers least-connections load balancing. The proxy selects the backend with the fewest active connections.
+order: 4000

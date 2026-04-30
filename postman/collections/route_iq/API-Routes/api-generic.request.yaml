@@ -1,0 +1,6 @@
+$kind: http-request
+name: API Generic
+method: GET
+url: 'http://{{proxy_host}}/api'
+description: Generic API path routed through the proxy. Middleware logs this as an API path.
+order: 1000
