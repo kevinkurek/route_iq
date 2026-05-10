@@ -88,6 +88,33 @@ RUST_LOG=route_iq=info  ./target/debug/route_iq    # routine progress (recommend
 RUST_LOG=route_iq=debug ./target/debug/route_iq    # very verbose, every probe
 ```
 
+### Sample tracing output
+
+With `RUST_LOG=route_iq=info`, a few requests + the background probe loop look like this (timestamps elided):
+
+```
+INFO route_iq: probing backends
+INFO route_iq::load_balancing: probe cycle complete healthy=["a", "b", "c", "d"] unhealthy=[]
+
+INFO handle: route_iq::proxy: selected backend=http://127.0.0.1:8080 method=GET path=/work
+INFO handle: route_iq::proxy: close time.busy=414µs time.idle=15.2ms method=GET path=/work
+
+INFO handle: route_iq::proxy: selected backend=http://127.0.0.1:8083 method=GET path=/work
+INFO handle: route_iq::proxy: close time.busy=232µs time.idle=593ms method=GET path=/work
+
+WARN route_iq::load_balancing: probe unhealthy backend=b status=500 Internal Server Error
+INFO route_iq::load_balancing: probe cycle complete healthy=["a", "c", "d"] unhealthy=["b"]
+```
+
+How to read it:
+
+- `probing backends` — the background probe loop ticking (every 2s, configured in [src/main.rs](src/main.rs)).
+- `probe cycle complete healthy=[...] unhealthy=[...]` — result of one probe round.
+- `handle:` prefix — every line inside that prefix fires inside the `handle` span for one specific request. `method=` and `path=` are inherited from the span, so even events from other modules (like `load_balancing::pick_backend`) get tagged with which request they belong to.
+- `selected backend=...` — the strategy picked this backend at the start of the request.
+- `close time.busy=... time.idle=...` — the span closed. `time.busy` is when your code was actively running; `time.idle` is when the future was parked waiting on the backend's response. For a reverse proxy, `idle` is most of the wall-clock time.
+- `probe unhealthy backend=b status=500` — a probe got a 5xx from a backend, so it'll be skipped on the next `pick_backend` call until a future probe sees it healthy again.
+
 ## Architecture at a glance
 
 ```
@@ -217,6 +244,8 @@ let state = Arc::new(AppState::new(RoundRobin::new(), backends));
 - Real `HttpHealthCheck` — issues an HTTP probe to each backend's `/health` and reads `status().is_success()`
 - Background health-check task on a 2-second tick (probe lives outside the request hot path; `handle` no longer locks for health)
 - `tracing` instrumentation with `RUST_LOG`-driven filtering — per-probe results, probe-cycle summary, and per-strategy "skipping unhealthy" warnings
+- Per-request `#[tracing::instrument]` span on `proxy::handle` — events from `load_balancing` (probe, skip) and `proxy` (selected, close) all inherit `method` and `path` fields, so concurrent requests are no longer interleaved noise
+- Span close events emit `time.busy` / `time.idle` automatically via `FmtSpan::CLOSE` — per-request latency observability without any per-handler timing code
 
 **Next (week 2 finishing)**
 - `POST /admin/strategy` endpoint to swap strategies at runtime
@@ -226,7 +255,6 @@ let state = Arc::new(AppState::new(RoundRobin::new(), backends));
 **Week 3**
 - Decision engine: collect per-backend latency / error metrics in-memory, auto-switch strategies based on triggered conditions (e.g. p95 latency above threshold)
 - Rate-limit algorithm switches (at most one per 60s window)
-- Wrap `proxy::handle` in a per-request tracing span so probe / pick / forward events are correlated by request ID
 
 **Optional / week 4+**
 - External observability (Datadog, etc.)

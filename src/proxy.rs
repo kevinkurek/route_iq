@@ -1,38 +1,9 @@
-
-// External Client (browser, curl)
-//         |
-//         v
-// [ Your App ]
-//   (hyper::Server)
-//         |
-//         v
-//    your logic
-//         |
-//         v
-//   (hyper::Client)
-//         |
-//         v
-// Backend Server
-
-// make_service_fn
-// It is a factory: for each new connection accepted by Hyper Server, it creates a service instance.
-// I.E. 1000 connections come in at once, 1000 service instances "service_fn(handle)" are spun up 
-// It is per connection, not per request.
-// A single connection can carry multiple requests, and they go through that connection’s one service instance.
-// For HTTP/2, many requests can be concurrent on one connection, still using that connection’s service.
-
-// service_fn(handle)
-// It adapts your async function handle into Hyper’s Service trait, so Hyper can call it for each HTTP request.
-
-// factory that takes a request and returns a response
-// let make_service = make_service_fn(|_| async {
-//     Ok::<_, Infallible>(service_fn(handle))
-// });
-
-// allows us to create one shared handler for all incoming connections
-// allows us to do things like reuse one client for outbound backend calls
-// only works if service function is clonable
-// let make_service = Shared::new(service_fn(handle));
+// Reverse-proxy core. `AppState` holds the backend list + selection strategy +
+// shared outbound HTTP client. `handle` is the per-request entry point: it
+// picks a backend, rewrites the URI, forwards via hyper::Client, and tracks
+// per-backend in-flight connection counts on the way in / out.
+//
+// See README "Request lifecycle" for the end-to-end diagram.
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
