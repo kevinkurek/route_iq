@@ -1,6 +1,8 @@
+use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 use std::sync::atomic::AtomicU64;
 use hyper::{Server, service::service_fn};
+use route_iq::load_balancing::refresh_health;
 use tower::make::Shared;
 use route_iq::{
     load_balancing::{Backend, RoundRobin},
@@ -12,6 +14,11 @@ use route_iq::{
 #[tokio::main]
 async fn main() {
 
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .compact()
+        .init();
+
     // Production backend topology. Each entry must have a `backend` process
     // listening on the matching port (see README "Run The Stack").
     let backends = vec![
@@ -22,6 +29,17 @@ async fn main() {
     ];
 
     let state = Arc::new(AppState::new(RoundRobin::new(), backends));
+
+    // probe health checks every 2 seconds
+    let probe_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let mut backends = probe_state.backends.lock().await;
+            println!("probing backend for health check");
+            refresh_health(&probe_state.checker, &mut backends).await;
+        }
+    });
 
     // log wrapping our handle
     let make_service = Shared::new(service_fn({

@@ -1,4 +1,6 @@
 use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
+use tracing::{debug, info, warn};
+use hyper::Client;
 
 // define
 // Backend - servers we'll connect to
@@ -54,8 +56,24 @@ impl LeastConnections {
 #[async_trait::async_trait]
 impl HealthCheck for HttpHealthCheck {
     async fn is_healthy(&self, backend: &Backend) -> bool {
-        // do async HTTP probe here; placeholder logic for now
-        backend.healthy
+
+        // perform health check with recurring N second probe to avoid blocking per request
+        let url = format!("{}/health", backend.addr).parse::<hyper::Uri>().unwrap();
+        let client = Client::new();
+        match client.get(url).await {
+            Ok(resp) if resp.status().is_success() => {
+                debug!(backend = %backend.id, status = %resp.status(), "probe ok");
+                true
+            },
+            Ok(resp) => {
+                warn!(backend = %backend.id, status = %resp.status(), "probe unhealthy");
+                false
+            }
+            Err(e) => {
+                warn!(backend = %backend.id, error = %e, "probe failed");
+                false
+            }
+        }
     }
 }
 
@@ -67,6 +85,22 @@ pub async fn refresh_health(
     for backend in backends.iter_mut() {
         backend.healthy = checker.is_healthy(backend).await;
     }
+
+    info!(
+        healthy = ?backends.iter().filter(|b| b.healthy).map(|b| &b.id).collect::<Vec<_>>(),
+        unhealthy = ?backends.iter().filter(|b| !b.healthy).map(|b| &b.id).collect::<Vec<_>>(),
+        "probe cycle complete"
+    )
+}
+
+fn log_unhealthy_skips(strategy: &str, backends: &[Backend]) {
+    if backends.iter().any(|b| !b.healthy) {
+        warn!(
+            strategy = strategy,
+            skipped = ?backends.iter().filter(|b| !b.healthy).map(|b| &b.id).collect::<Vec<_>>(),
+            "skipping unhealthy"
+        )
+    }
 }
 
 impl LoadBalancingStrategy for RoundRobin {
@@ -77,6 +111,9 @@ impl LoadBalancingStrategy for RoundRobin {
             .enumerate()
             .filter_map(|(i, b)| b.healthy.then_some(i))
             .collect();
+
+        // trace unhealthy skips
+        log_unhealthy_skips("rr", backends);
 
         // check if at least one is healthy
         if healthy.is_empty() {
@@ -101,6 +138,11 @@ impl LoadBalancingStrategy for RoundRobin {
 
 impl LoadBalancingStrategy for LeastConnections {
     fn pick_backend(&self, backends: &[Backend]) -> Option<usize> {
+
+        // trace skipped backend if unhealthy
+        log_unhealthy_skips("lc", backends);
+
+        // actually select port with least connections
         backends
             .iter()
             .enumerate()

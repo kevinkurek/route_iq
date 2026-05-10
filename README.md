@@ -198,22 +198,47 @@ let state = Arc::new(AppState::new(RoundRobin::new(), backends));
 - Hermetic integration tests with injected backend lists
 - `PORT`-configurable backend binary, runs N copies as separate processes
 - Postman collection runnable from the terminal
+- Real `/health` and `/work` endpoints on the backend (with built-in randomized latency / error injection on `/work` so RR vs LC actually diverge under load)
+- Real `HttpHealthCheck` — issues an HTTP probe to each backend's `/health` and reads `status().is_success()`
+- Background health-check task on a 2-second tick (probe lives outside the request hot path; `handle` no longer locks for health)
+- `tracing` instrumentation with `RUST_LOG`-driven filtering — per-probe results, probe-cycle summary, and per-strategy "skipping unhealthy" warnings
 
 **Next (week 2 finishing)**
-- Real `/health` and `/work` endpoints on the backend (currently returns 200 to any path)
-- `?delay_ms=` and `?error_rate=` query knobs on `/work` for stress-testing
 - `POST /admin/strategy` endpoint to swap strategies at runtime
-- Compare RR vs LC behavior under load using `hey` / `oha`
+- Compare RR vs LC behavior under load using `hey` / `oha` and capture latency percentiles
+- Decide whether to expose `?delay_ms=` / `?error_rate=` query knobs on `/work` for repeatable scenarios (currently the variation is randomized inside the handler — fine for ambient noise, but harder to reproduce a specific stress condition)
 
 **Week 3**
-- Real `HttpHealthCheck` (currently a stub that always returns the cached `healthy` flag)
-- Background health-check task — current code probes inline on every request, which won't scale
-- Decision engine: collect per-backend latency / error metrics, auto-switch strategies based on conditions
+- Decision engine: collect per-backend latency / error metrics in-memory, auto-switch strategies based on triggered conditions (e.g. p95 latency above threshold)
+- Rate-limit algorithm switches (at most one per 60s window)
+- Wrap `proxy::handle` in a per-request tracing span so probe / pick / forward events are correlated by request ID
 
 **Optional / week 4+**
 - External observability (Datadog, etc.)
 - Fault tolerance for proxy failures
 - Containerization + orchestration
+
+**Stretch direction: AI inference routing**
+
+The same proxy shape applies to routing across LLMs (GPT, Claude, Llama, fine-tuned small models) — but the "backends" have wildly different cost, latency, and capability, so selection gets smarter:
+
+- *Cost-based* — try cheap model first, escalate only if needed.
+- *Capability-based* — classify the request (code / math / chat) and route to the best-fit model.
+- *Cascading* — small model answers first; retry on a bigger one if confidence is low.
+- *Semantic caching* — hash prompt meaning, return cached answer for similar queries.
+- *Token-aware least-loaded* — track tokens-in-flight per backend (a 100k-token request ties up a GPU very differently from a 100-token one).
+
+This is the "AI gateway" product category (Portkey, LiteLLM, Cloudflare AI Gateway).
+
+**Stretch direction: security & red teaming**
+
+Layered on top of the AI-gateway shape:
+
+- *Prompt injection / jailbreak detection* on inbound requests.
+- *Output filtering* on model responses before returning to client.
+- *PII redaction* before sending to third-party providers.
+- *Per-user / per-key rate limits* — relevant when each request costs real money.
+- *Red teaming* — adversarial testing where attackers (humans or automated) actively try to extract secrets, jailbreak the model, or trigger harmful outputs. Build a harness that runs known attack prompts against the gateway and asserts they're blocked.
 
 ## Implementation notes
 

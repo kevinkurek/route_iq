@@ -43,7 +43,7 @@ use hyper::{Body,
             Request, 
             Response, StatusCode};
 
-use crate::load_balancing::{Backend, HttpHealthCheck, LoadBalancingStrategy, refresh_health};
+use crate::load_balancing::{Backend, HttpHealthCheck, LoadBalancingStrategy};
 
 pub struct AppState<B: LoadBalancingStrategy> {
     pub backends: Mutex<Vec<Backend>>,
@@ -71,10 +71,7 @@ pub async fn handle<B: LoadBalancingStrategy>(
     // Ok(Response::new(Body::from("Hello from HTTP proxy")))
 
     let (selected_backend_addr, selected_backend_id) = {
-        let mut backends = state.backends.lock().await;
-        
-        // perform health checks
-        refresh_health(&state.checker, &mut backends).await;
+        let backends = state.backends.lock().await;
 
         match state.balancer.pick_backend(&backends) {
             Some(i) => {
