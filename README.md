@@ -122,11 +122,11 @@ How to read it:
                   │         route_iq (proxy)        │
                   │         127.0.0.1:3000          │
   curl / Postman  │                                 │      backend (a)
-        ─────────►│   1. log middleware             │ ───► 127.0.0.1:8080
-                  │   2. pick backend (strategy)    │
-                  │   3. rewrite URI                │      backend (b)
-                  │   4. forward via hyper::Client  │ ───► 127.0.0.1:8081
-                  │   5. decrement counter on ret.  │
+        ─────────►│   1. pick backend (strategy)    │ ───► 127.0.0.1:8080
+                  │   2. rewrite URI                │
+                  │   3. forward via hyper::Client  │      backend (b)
+                  │   4. decrement counter on ret.  │ ───► 127.0.0.1:8081
+                  │                                 │
                   │                                 │      backend (c)
                   └─────────────────────────────────┘ ───► 127.0.0.1:8082
 
