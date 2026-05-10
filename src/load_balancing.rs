@@ -188,17 +188,104 @@ mod tests {
         assert_eq!(vec!["a", "c", "d", "a", "c"], picks);
     }
 
+    // -------- HttpHealthCheck::is_healthy: real HTTP probe behavior --------
+    //
+    // These three tests spin up tiny in-process hyper servers on ephemeral ports
+    // and point HttpHealthCheck at them, so the probe path is exercised end-to-end
+    // without depending on the real `backend` binary or any global ports.
+
+    use std::convert::Infallible;
+    use std::net::SocketAddr;
+    use hyper::{Body, Response, Server, StatusCode};
+    use hyper::service::{make_service_fn, service_fn};
+
+    /// Spawn a tiny fake backend that returns the given status from /health.
+    /// Returns the bound address so the caller can build a Backend pointing at it.
+    async fn spawn_fake_health(status: StatusCode) -> SocketAddr {
+        let make_svc = make_service_fn(move |_| async move {
+            Ok::<_, Infallible>(service_fn(move |_req| async move {
+                let resp = Response::builder()
+                    .status(status)
+                    .body(Body::from("fake"))
+                    .unwrap();
+                Ok::<_, Infallible>(resp)
+            }))
+        });
+        let server = Server::bind(&SocketAddr::from(([127, 0, 0, 1], 0))).serve(make_svc);
+        let addr = server.local_addr();
+        tokio::spawn(server);
+        addr
+    }
+
     #[tokio::test]
-    async fn check_health_statuses() {
+    async fn is_healthy_returns_true_when_health_probe_returns_200() {
+        let addr = spawn_fake_health(StatusCode::OK).await;
+        let backend = Backend {
+            addr: format!("http://{}", addr),
+            id: "ok".into(),
+            active_connections: AtomicU64::new(0),
+            healthy: false, // start false to confirm the probe flips it true
+        };
+
+        let healthy = HttpHealthCheck.is_healthy(&backend).await;
+        assert!(healthy, "200 OK from /health should be reported healthy");
+    }
+
+    #[tokio::test]
+    async fn is_healthy_returns_false_when_health_probe_returns_500() {
+        let addr = spawn_fake_health(StatusCode::INTERNAL_SERVER_ERROR).await;
+        let backend = Backend {
+            addr: format!("http://{}", addr),
+            id: "sick".into(),
+            active_connections: AtomicU64::new(0),
+            healthy: true, // start true to confirm the probe flips it false
+        };
+
+        let healthy = HttpHealthCheck.is_healthy(&backend).await;
+        assert!(!healthy, "500 from /health should be reported unhealthy");
+    }
+
+    #[tokio::test]
+    async fn is_healthy_returns_false_when_backend_is_unreachable() {
+        // Point at a port we are confident is not bound. The HTTP client will
+        // fail to connect, the match arm returns Err(_) -> false.
+        let backend = Backend {
+            addr: "http://127.0.0.1:1".to_string(), // privileged port, virtually never bound for user processes
+            id: "dead".into(),
+            active_connections: AtomicU64::new(0),
+            healthy: true,
+        };
+
+        let healthy = HttpHealthCheck.is_healthy(&backend).await;
+        assert!(!healthy, "unreachable backend should be reported unhealthy");
+    }
+
+    #[tokio::test]
+    async fn refresh_health_updates_each_backend_flag_independently() {
+        // One healthy, one sick — verify refresh_health writes the right
+        // value into each entry's `healthy` field independently.
+        let healthy_addr = spawn_fake_health(StatusCode::OK).await;
+        let sick_addr = spawn_fake_health(StatusCode::INTERNAL_SERVER_ERROR).await;
+
         let mut backends = vec![
-            Backend {addr: "http://127.0.0.1:8080".to_owned(), id: "a".into(), active_connections: AtomicU64::new(2), healthy: true},
-            Backend {addr: "http://127.0.0.1:8081".to_owned(), id: "b".into(), active_connections: AtomicU64::new(3), healthy: false},
-            Backend {addr: "http://127.0.0.1:8082".to_owned(), id: "c".into(), active_connections: AtomicU64::new(10), healthy: true},
-            Backend {addr: "http://127.0.0.1:8083".to_owned(), id: "d".into(), active_connections: AtomicU64::new(10), healthy: true},
+            Backend {
+                addr: format!("http://{}", healthy_addr),
+                id: "good".into(),
+                active_connections: AtomicU64::new(0),
+                healthy: false, // wrong on purpose
+            },
+            Backend {
+                addr: format!("http://{}", sick_addr),
+                id: "bad".into(),
+                active_connections: AtomicU64::new(0),
+                healthy: true, // wrong on purpose
+            },
         ];
 
-        let checker = HttpHealthCheck;
-        refresh_health(&checker, &mut backends).await;
+        refresh_health(&HttpHealthCheck, &mut backends).await;
+
+        assert!(backends[0].healthy, "good backend should be marked healthy");
+        assert!(!backends[1].healthy, "bad backend should be marked unhealthy");
     }
 
     #[test]

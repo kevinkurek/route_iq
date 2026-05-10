@@ -11,6 +11,79 @@ A small Rust reverse-proxy with pluggable load-balancing strategies. The goal is
 
 The strategy is chosen at startup in `src/main.rs`. Runtime switching via an admin endpoint is on the roadmap.
 
+## Quick reference (copy-paste cheatsheet)
+
+When future-you forgets every command, this section is the answer. Each block is self-contained — no setup steps to remember.
+
+### Build
+
+```bash
+cargo build --bin backend --bin route_iq
+```
+
+### Start the stack (4 backends + proxy)
+
+```bash
+PORT=8080 ./target/debug/backend &
+PORT=8081 ./target/debug/backend &
+PORT=8082 ./target/debug/backend &
+PORT=8083 ./target/debug/backend &
+RUST_LOG=route_iq=info ./target/debug/route_iq
+```
+
+The proxy runs in the foreground so you can see its log output. The four backends are background jobs in the same shell.
+
+### Stop the stack
+
+```bash
+# from the same shell that launched them:
+kill $(jobs -p)
+
+# from any shell (nuclear option):
+pkill -f target/debug/backend
+pkill -f target/debug/route_iq
+```
+
+### Send traffic
+
+```bash
+# Through the proxy (rotates backends per the active strategy)
+curl -i http://127.0.0.1:3000/work
+curl -i http://127.0.0.1:3000/health
+
+# Directly at one backend (bypasses the proxy)
+curl -i http://127.0.0.1:8080/work
+
+# Run the Postman collection (note the path — postman CLI requires it)
+postman collection run postman/collections/route_iq
+```
+
+### Run tests
+
+```bash
+cargo test                                          # all tests
+cargo test -- --nocapture                           # with println output
+cargo test --test backend_integration               # backend handler tests
+cargo test --test proxy_integration                 # proxy / forwarding tests
+RUST_LOG=route_iq=debug cargo test -- --nocapture   # tests with tracing visible
+```
+
+### Inspect what's running
+
+```bash
+lsof -nP -iTCP:3000 -iTCP:8080 -iTCP:8081 -iTCP:8082 -iTCP:8083 -sTCP:LISTEN
+```
+
+### Tracing verbosity
+
+The proxy uses the `tracing` crate; `RUST_LOG` controls which levels print.
+
+```bash
+RUST_LOG=route_iq=warn  ./target/debug/route_iq    # only warnings/errors
+RUST_LOG=route_iq=info  ./target/debug/route_iq    # routine progress (recommended)
+RUST_LOG=route_iq=debug ./target/debug/route_iq    # very verbose, every probe
+```
+
 ## Architecture at a glance
 
 ```
@@ -34,57 +107,65 @@ Each backend is a separate OS process running the same `backend` binary, told wh
 
 ## Request lifecycle
 
-Following one `GET /hello` from `curl` all the way through:
+Following one `GET /work` from `curl` all the way through:
 
 ```
 client                proxy (:3000)                       backend (e.g. :8081)
   │                       │                                       │
-  │  GET /hello           │                                       │
+  │  GET /work            │                                       │
   ├──────────────────────►│                                       │
   │                       │                                       │
   │                  ┌────┴────┐                                  │
-  │                  │ log mw  │  prints "Generic Path: /hello"   │
+  │                  │ log mw  │  prints "Generic Path: /work"    │
   │                  └────┬────┘                                  │
   │                       │                                       │
   │              ┌────────┴────────┐                              │
-  │              │ pick_backend()  │  strategy picks index → "b"  │
-  │              └────────┬────────┘                              │
+  │              │ pick_backend()  │  picks healthy index → "b"   │
+  │              └────────┬────────┘  (unhealthy entries skipped) │
   │                       │                                       │
   │             active_connections[b] += 1                        │
   │                       │                                       │
-  │           rewrite URI → http://127.0.0.1:8081/hello           │
+  │           rewrite URI → http://127.0.0.1:8081/work            │
   │                       │                                       │
-  │                       │  GET /hello                           │
+  │                       │  GET /work                            │
   │                       ├──────────────────────────────────────►│
   │                       │                                       │
-  │                       │                              200 OK   │
+  │                       │                       does ~10ms work │
+  │                       │                                       │
+  │                       │             200 OK (or 5xx, see note) │
   │                       │◄──────────────────────────────────────┤
   │                       │                                       │
   │             active_connections[b] -= 1                        │
   │                       │                                       │
-  │              200 OK   │                                       │
+  │  passthrough status   │                                       │
   │◄──────────────────────┤                                       │
 ```
 
-The strategy never holds the mutex while the backend call is in flight — the proxy locks just long enough to pick + increment, releases, forwards, then re-locks briefly to decrement. That's why concurrent requests can run in parallel even though the backend list lives behind a `Mutex`.
+**Notes worth remembering:**
+
+- The strategy never holds the mutex while the backend call is in flight — the proxy locks just long enough to pick + increment, releases, forwards, then re-locks briefly to decrement. That's why concurrent requests can run in parallel even though the backend list lives behind a `Mutex`.
+- The `healthy` flag on each backend is set by a **separate background probe task** that runs every 2 seconds (see `tokio::spawn` in [src/main.rs](src/main.rs)). The request path only *reads* it — health checks never block traffic.
+- The proxy is intentionally **passthrough**: it does not retry, rewrite responses, or hide upstream errors. If the backend returns 500/503/504, the client sees that same status. The strategies bias *which* backend gets traffic, not whether the response succeeds.
 
 ## Project layout
 
 ```
 src/
-├── main.rs              # entry point: defines backend list, starts hyper Server on :3000
-├── lib.rs               # exports the three modules below
-├── proxy.rs             # AppState, handle() — the request handler
-├── middleware.rs        # log() — wraps handle() to print path classification
-├── load_balancing.rs    # Backend struct, LoadBalancingStrategy trait, RR / LC impls
+├── main.rs                    # proxy entry point: backend list, tracing init, probe loop, hyper Server on :3000
+├── lib.rs                     # exports the modules below
+├── proxy.rs                   # AppState, handle() — the proxy request handler
+├── middleware.rs              # log() — wraps handle() to print path classification
+├── load_balancing.rs          # Backend struct, LoadBalancingStrategy trait, RR / LC impls, HttpHealthCheck
+├── backend.rs                 # backend handlers: handle / health / work (reusable from tests + bin)
 └── bin/
-    └── backend.rs       # tiny stand-alone backend; reads PORT, returns 200 to anything
+    └── backend.rs             # thin tokio::main wrapper that serves route_iq::backend::handle
 
 tests/
-└── proxy_integration.rs # end-to-end tests with in-process fake backends
+├── proxy_integration.rs       # end-to-end proxy tests with in-process fake backends
+└── backend_integration.rs     # backend handler tests (calls handle directly, no subprocess)
 
 postman/
-└── collections/route_iq # YAML collection for `postman collection run`
+└── collections/route_iq       # YAML collection for `postman collection run postman/collections/route_iq`
 ```
 
 Quick map of "where does X live":
@@ -92,11 +173,14 @@ Quick map of "where does X live":
 | You want to change... | Look in |
 |----------------------|---------|
 | The list of backend addresses | [src/main.rs](src/main.rs) |
+| How often health probes run | [src/main.rs](src/main.rs) (`tokio::spawn` block) |
 | How a request gets forwarded | [src/proxy.rs](src/proxy.rs) (`handle`) |
 | The selection algorithm | [src/load_balancing.rs](src/load_balancing.rs) |
+| The real `/health` HTTP probe | [src/load_balancing.rs](src/load_balancing.rs) (`HttpHealthCheck::is_healthy`) |
 | What gets logged per request | [src/middleware.rs](src/middleware.rs) |
-| The backend's own behavior (currently always-200) | [src/bin/backend.rs](src/bin/backend.rs) |
-| End-to-end tests | [tests/proxy_integration.rs](tests/proxy_integration.rs) |
+| Backend route handlers (`/health`, `/work`, 404) | [src/backend.rs](src/backend.rs) |
+| Proxy integration tests | [tests/proxy_integration.rs](tests/proxy_integration.rs) |
+| Backend handler tests | [tests/backend_integration.rs](tests/backend_integration.rs) |
 
 ## Run the stack
 

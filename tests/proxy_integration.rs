@@ -212,3 +212,32 @@ async fn proxy_least_connections_prefers_lowest_in_flight_backends() {
     assert_eq!(backends[2].active_connections.load(Ordering::Relaxed), 1);
     assert_eq!(backends[3].active_connections.load(Ordering::Relaxed), 0);
 }
+#[tokio::test]
+async fn proxy_returns_503_when_all_backends_are_unhealthy() {
+    // No fake server needed — when every backend is marked unhealthy, the
+    // strategy returns None and the proxy short-circuits to 503 *before* any
+    // outbound HTTP call. So we can use bogus addresses safely.
+    let backends = (0..4)
+        .map(|i| Backend {
+            addr: "http://127.0.0.1:1".to_string(),
+            id: ((b'a' + i as u8) as char).to_string(),
+            active_connections: AtomicU64::new(0),
+            healthy: false,
+        })
+        .collect();
+
+    let state = Arc::new(AppState::new(RoundRobin::new(), backends));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("http://example.invalid/anything")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = handle(req, Arc::clone(&state)).await.unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::SERVICE_UNAVAILABLE);
+
+    // Counters should not have been touched — pick_backend never returned Some.
+    let backends = state.backends.lock().await;
+    assert!(backends.iter().all(|b| b.active_connections.load(Ordering::Relaxed) == 0));
+}
