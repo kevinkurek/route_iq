@@ -36,6 +36,7 @@
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tracing::info;
 use std::sync::atomic::Ordering;
 
 use hyper::{Body, 
@@ -63,14 +64,19 @@ impl<B: LoadBalancingStrategy> AppState<B> {
     }
 }
 
-// handle requests
+// handle requests w/ load balancing strategy selecting the backend
+#[tracing::instrument(
+    skip(req, state),
+    fields(method = %req.method(), path = %req.uri().path())
+)]
 pub async fn handle<B: LoadBalancingStrategy>(
     req: Request<Body>,
     state: Arc<AppState<B>>,
 ) -> Result<Response<Body>, hyper::Error> {
-    // Ok(Response::new(Body::from("Hello from HTTP proxy")))
 
     let (selected_backend_addr, selected_backend_id) = {
+
+        // locks mutex to ensure backend selection is static during LoadBalancingStrategy backend selection
         let backends = state.backends.lock().await;
 
         match state.balancer.pick_backend(&backends) {
@@ -88,7 +94,7 @@ pub async fn handle<B: LoadBalancingStrategy>(
         } 
     };
     
-    println!("Selected backend: {}", selected_backend_addr);
+    info!(backend = %selected_backend_addr, "selected");
 
     let path_query = req
         .uri()

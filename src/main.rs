@@ -6,9 +6,9 @@ use route_iq::load_balancing::refresh_health;
 use tower::make::Shared;
 use route_iq::{
     load_balancing::{Backend, RoundRobin},
-    middleware::log,
-    proxy::AppState,
+    proxy::{AppState, handle},
 };
+use tracing::info;
 
 // start app
 #[tokio::main]
@@ -16,6 +16,7 @@ async fn main() {
 
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .compact()
         .init();
 
@@ -36,15 +37,15 @@ async fn main() {
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             let mut backends = probe_state.backends.lock().await;
-            println!("probing backend for health check");
+            info!("probing backends");
             refresh_health(&probe_state.checker, &mut backends).await;
         }
     });
 
-    // log wrapping our handle
+    // service factory — calls proxy::handle directly for each request
     let make_service = Shared::new(service_fn({
         let state = Arc::clone(&state);
-        move |req| log(req, Arc::clone(&state))
+        move |req| handle(req, Arc::clone(&state))
     }));
 
     // proxy address & hyper server

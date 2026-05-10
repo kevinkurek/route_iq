@@ -119,10 +119,6 @@ client                proxy (:3000)                       backend (e.g. :8081)
   │  GET /work            │                                       │
   ├──────────────────────►│                                       │
   │                       │                                       │
-  │                  ┌────┴────┐                                  │
-  │                  │ log mw  │  prints "Generic Path: /work"    │
-  │                  └────┬────┘                                  │
-  │                       │                                       │
   │              ┌────────┴────────┐                              │
   │              │ pick_backend()  │  picks healthy index → "b"   │
   │              └────────┬────────┘  (unhealthy entries skipped) │
@@ -158,7 +154,6 @@ src/
 ├── main.rs                    # proxy entry point: backend list, tracing init, probe loop, hyper Server on :3000
 ├── lib.rs                     # exports the modules below
 ├── proxy.rs                   # AppState, handle() — the proxy request handler
-├── middleware.rs              # log() — wraps handle() to print path classification
 ├── load_balancing.rs          # Backend struct, LoadBalancingStrategy trait, RR / LC impls, HttpHealthCheck
 ├── backend.rs                 # backend handlers: handle / health / work (reusable from tests + bin)
 └── bin/
@@ -181,7 +176,6 @@ Quick map of "where does X live":
 | How a request gets forwarded | [src/proxy.rs](src/proxy.rs) (`handle`) |
 | The selection algorithm | [src/load_balancing.rs](src/load_balancing.rs) |
 | The real `/health` HTTP probe | [src/load_balancing.rs](src/load_balancing.rs) (`HttpHealthCheck::is_healthy`) |
-| What gets logged per request | [src/middleware.rs](src/middleware.rs) |
 | Backend route handlers (`/health`, `/work`, 404) | [src/backend.rs](src/backend.rs) |
 | Proxy integration tests | [tests/proxy_integration.rs](tests/proxy_integration.rs) |
 | Backend handler tests | [tests/backend_integration.rs](tests/backend_integration.rs) |
@@ -216,7 +210,6 @@ let state = Arc::new(AppState::new(RoundRobin::new(), backends));
 - Reverse-proxy core: hyper server, URI rewrite, forward via `hyper::Client`
 - Round Robin and Least Connections strategies behind a shared trait
 - Per-backend in-flight counter using atomics
-- Path-classifying logging middleware (`/api/*` vs everything else)
 - Hermetic integration tests with injected backend lists
 - `PORT`-configurable backend binary, runs N copies as separate processes
 - Postman collection runnable from the terminal
