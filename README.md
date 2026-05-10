@@ -21,6 +21,8 @@ When future-you forgets every command, this section is the answer. Each block is
 cargo build --bin backend --bin route_iq
 ```
 
+> ⚠️ If the proxy is already running from a previous build, kill it before relaunching (`pkill -f target/debug/route_iq`). Otherwise the new binary silently fails to bind `:3000`.
+
 ### Start the stack (4 backends + proxy)
 
 ```bash
@@ -59,6 +61,8 @@ postman collection run postman/collections/route_iq
 ```
 
 ### Run tests
+
+Tests are hermetic — they spawn their own in-process fake backends on ephemeral ports, so 8080–8083 don't need to be running.
 
 ```bash
 cargo test                                          # all tests
@@ -181,72 +185,6 @@ Quick map of "where does X live":
 | Backend route handlers (`/health`, `/work`, 404) | [src/backend.rs](src/backend.rs) |
 | Proxy integration tests | [tests/proxy_integration.rs](tests/proxy_integration.rs) |
 | Backend handler tests | [tests/backend_integration.rs](tests/backend_integration.rs) |
-
-## Run the stack
-
-### 1. Build both binaries
-
-```bash
-cargo build --bin backend --bin route_iq
-```
-
-### 2. Start four backend instances
-
-The backend reads `PORT` from the environment (defaults to `8080`). Run four copies on different ports:
-
-```bash
-cargo build --bin backend
-PORT=8080 ./target/debug/backend &
-PORT=8081 ./target/debug/backend &
-PORT=8082 ./target/debug/backend &
-PORT=8083 ./target/debug/backend &
-
-# kill all four at once:
-kill $(jobs -p)
-```
-
-Each one prints `HTTP server listening on http://127.0.0.1:808X` once it's ready.
-
-### 3. Start the proxy
-
-In another terminal:
-
-```bash
-./target/debug/route_iq
-# or: cargo run --bin route_iq
-```
-
-> ⚠️ When you change Rust code, kill the proxy (`pkill -f target/debug/route_iq`) before relaunching. Otherwise the OS keeps the old binary on :3000 and silently rejects the new one.
-
-### 4. Send traffic
-
-```bash
-# Through the proxy — rotates across backends per the active strategy
-curl -i http://127.0.0.1:3000/hello
-
-# Directly at one backend (bypassing the proxy)
-curl -i http://127.0.0.1:8080/
-```
-
-Watch the proxy terminal — you'll see `Selected backend: http://127.0.0.1:808X` for every request, which is how you visually confirm the strategy is rotating.
-
-### 5. Run the Postman collection from the terminal
-
-```bash
-postman collection run postman/collections/route_iq
-```
-
-All routes should return 200 once the four backends are running.
-
-## Test
-
-```bash
-cargo test                                              # everything
-cargo test -- --nocapture                               # with println output
-cargo test --test proxy_integration -- --nocapture      # integration only
-```
-
-Integration tests are hermetic — they spawn their own in-process fake backend on an ephemeral port, so they don't depend on anything listening on 8080–8083.
 
 ## Load-balancing strategies
 
