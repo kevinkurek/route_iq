@@ -62,6 +62,14 @@ done
 
 select_tool() {
   if [[ "$TOOL" == "oha" || "$TOOL" == "hey" ]]; then
+    if ! command -v "$TOOL" >/dev/null 2>&1; then
+      cat >&2 <<ERR
+Requested tool '$TOOL' is not installed.
+Install '$TOOL' or run with --tool auto.
+ERR
+      echo "error"
+      return 0
+    fi
     echo "$TOOL"
     return 0
   fi
