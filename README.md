@@ -60,6 +60,23 @@ curl -i http://127.0.0.1:8080/work
 postman collection run postman/collections/route_iq
 ```
 
+### Intro load testing (`oha` or `hey`)
+
+Use one tool, not both. They solve the same basic problem. `oha` is the default recommendation, and `hey` is a fine alternative.
+
+```bash
+# from repo root
+./scripts/load_test.sh
+
+# choose hey explicitly
+./scripts/load_test.sh --tool hey
+
+# custom target / load
+./scripts/load_test.sh --url http://127.0.0.1:3000/work --requests 400 --concurrency 40
+```
+
+Script location: `scripts/load_test.sh`
+
 ### Run tests
 
 Tests are hermetic — they spawn their own in-process fake backends on ephemeral ports, so 8080–8083 don't need to be running.
