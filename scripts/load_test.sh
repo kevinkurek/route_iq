@@ -67,8 +67,7 @@ select_tool() {
 Requested tool '$TOOL' is not installed.
 Install '$TOOL' or run with --tool auto.
 ERR
-      echo "error"
-      return 0
+      return 1
     fi
     echo "$TOOL"
     return 0
@@ -84,18 +83,16 @@ ERR
     return 0
   fi
 
-  echo "error"
-}
-
-SELECTED_TOOL="$(select_tool)"
-
-if [[ "$SELECTED_TOOL" == "error" ]]; then
   cat >&2 <<ERR
 No load-test tool found.
 Install one of:
   - oha  (recommended)
   - hey
 ERR
+  return 1
+}
+
+if ! SELECTED_TOOL="$(select_tool)"; then
   exit 1
 fi
 

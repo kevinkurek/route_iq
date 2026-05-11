@@ -62,7 +62,7 @@ postman collection run postman/collections/route_iq
 
 ### Intro load testing (`oha` or `hey`)
 
-Use one tool, not both. They solve the same basic problem. `oha` is the default recommendation, and `hey` is a fine alternative.
+Install either `oha` (recommended) or `hey` — you only need one. They solve the same basic problem.
 
 ```bash
 # from repo root
