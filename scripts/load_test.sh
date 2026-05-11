@@ -105,4 +105,9 @@ if [[ "$SELECTED_TOOL" == "oha" ]]; then
   exec oha -n "$REQUESTS" -c "$CONCURRENCY" "$URL"
 fi
 
-exec hey -n "$REQUESTS" -c "$CONCURRENCY" "$URL"
+if [[ "$SELECTED_TOOL" == "hey" ]]; then
+  exec hey -n "$REQUESTS" -c "$CONCURRENCY" "$URL"
+fi
+
+echo "Unexpected tool selection: $SELECTED_TOOL" >&2
+exit 1
