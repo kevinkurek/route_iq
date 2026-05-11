@@ -231,6 +231,76 @@ let state = Arc::new(AppState::new(RoundRobin::new(), backends));
 //                                  ^^^^^^^^^^^^^^^ swap to LeastConnections::new()
 ```
 
+## Load testing with `oha`
+
+Once the stack is up, you can drive synthetic traffic at the proxy to see how the strategies behave under load. [`oha`](https://github.com/hatoo/oha) is a small Rust load tester with a live histogram TUI; install with `brew install oha`.
+
+A smoke test (1000 requests, 10 concurrent):
+
+```bash
+oha -n 1000 -c 10 http://127.0.0.1:3000/work
+```
+
+Aim at `/work` — it has built-in randomized delay and error injection, so the numbers actually exercise the system. `/health` is too fast to measure usefully.
+
+### Reading the output
+
+A real run against this stack:
+
+```
+Summary:
+  Success rate: 100.00%
+  Total:        754.1913 ms
+  Slowest:      737.4475 ms
+  Fastest:      8.7268 ms
+  Average:      28.3388 ms
+  Requests/sec: 132.5923
+
+Response time histogram:
+    8.727 ms [ 1] |
+   81.599 ms [96] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+  154.471 ms [ 0] |
+  ...
+  445.959 ms [ 2] |
+  ...
+  737.447 ms [ 1] |
+
+Response time distribution:
+  50.00% in  13.1140 ms      ← p50: typical request
+  95.00% in  17.8680 ms      ← p95: most users' worst experience
+  99.00% in 737.4475 ms      ← p99: the slow-path 1%
+
+Status code distribution:
+  [200] 92 responses
+  [500]  5 responses
+  [503]  3 responses
+```
+
+What each block tells you:
+
+- **Success rate** — % of requests that got *any* response back, **not** HTTP 2xx. A 500 or 503 still counts as "successful" here; this only drops when a request times out or the connection is refused.
+- **Slowest / Fastest / Average** — average is misleading when latency is bimodal (most fast, a few very slow). The percentiles below are what you actually want to look at.
+- **Requests/sec** — throughput. Use for comparison between runs, not as an absolute SLA.
+- **Response time histogram** — visual of where requests landed. In this run, 96 of 100 sat in the 8–82ms bucket (the normal `/work` path), with 3 outliers in the 446–737ms range (the 5% random slow path in `backend.rs` firing).
+- **Response time distribution (percentiles)** — the most useful section:
+  - **p50 (13ms)** — median. Half the requests were faster, half were slower.
+  - **p95 (18ms)** — only 5% of requests were slower than this.
+  - **p99 (737ms)** — the tail. This is **where strategies diverge most.** Only 1% of requests hit a slow backend, but when they did, they took 700+ms.
+- **Status code distribution** — your `/work` handler randomly returns 500 (~6%) and 503 (~3%) on purpose to simulate flaky upstream. Here 5×500 + 3×503 + 92×200 matches the design.
+
+### Comparing Round Robin vs Least Connections
+
+There's no runtime switch endpoint yet, so swap strategies by editing [src/main.rs](src/main.rs), rebuilding, and re-running the same `oha` command. Save both outputs and compare:
+
+| Metric | What to watch for |
+|--------|-------------------|
+| **p50** | Usually unchanged — typical latency isn't strategy-sensitive. |
+| **p95** | Subtle differences. |
+| **p99** | **The headline number.** LC should meaningfully beat RR here when one backend is slow, because LC stops piling new requests onto a backend that's already stuck. |
+| **Status distribution** | Sanity check — same `/work` randomness, so similar 200/500/503 ratios across runs. |
+
+For a clean signal you'll want more volume than the smoke test — try `oha -n 5000 -c 50` and run with `RUST_LOG=route_iq=warn` so per-request tracing doesn't dominate the proxy's stdout.
+
 ## Status & roadmap
 
 **Done**
@@ -246,11 +316,12 @@ let state = Arc::new(AppState::new(RoundRobin::new(), backends));
 - `tracing` instrumentation with `RUST_LOG`-driven filtering — per-probe results, probe-cycle summary, and per-strategy "skipping unhealthy" warnings
 - Per-request `#[tracing::instrument]` span on `proxy::handle` — events from `load_balancing` (probe, skip) and `proxy` (selected, close) all inherit `method` and `path` fields, so concurrent requests are no longer interleaved noise
 - Span close events emit `time.busy` / `time.idle` automatically via `FmtSpan::CLOSE` — per-request latency observability without any per-handler timing code
+- Load-test harness wired up with `oha` — smoke run confirmed against `/work`, README documents how to install, run, and interpret the output (percentiles, histogram, status distribution)
 
 **Next (week 2 finishing)**
 - `POST /admin/strategy` endpoint to swap strategies at runtime
-- Compare RR vs LC behavior under load using `hey` / `oha` and capture latency percentiles
-- Decide whether to expose `?delay_ms=` / `?error_rate=` query knobs on `/work` for repeatable scenarios (currently the variation is randomized inside the handler — fine for ambient noise, but harder to reproduce a specific stress condition)
+- Run a full RR vs LC head-to-head with `oha` (e.g. `-n 5000 -c 50`), capture both runs' p50 / p95 / p99 + status distribution, and add a `## Benchmarks` section to this README with the numbers
+- Decide whether to expose `?delay_ms=` / `?error_rate=` query knobs on `/work` for repeatable scenarios — randomized injection is fine for ambient noise but harder to reproduce a specific stress condition. Punt this decision until after the first head-to-head: if the random variation produces a clear RR vs LC signal, no need to add knobs.
 
 **Week 3**
 - Decision engine: collect per-backend latency / error metrics in-memory, auto-switch strategies based on triggered conditions (e.g. p95 latency above threshold)
