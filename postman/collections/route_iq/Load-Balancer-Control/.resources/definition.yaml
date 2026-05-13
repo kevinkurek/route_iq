@@ -1,0 +1,4 @@
+$kind: collection
+name: Load Balancer Control
+description: Runtime control endpoints on the proxy. POST to /admin/strategy/<name> to swap the active load-balancing strategy without restarting.
+order: 4000

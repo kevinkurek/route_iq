@@ -1,0 +1,6 @@
+$kind: http-request
+name: Switch Strategy to Least Connections
+method: POST
+url: 'http://{{proxy_host}}/admin/strategy/least_connections'
+description: Atomically swap the proxy's active load-balancing strategy to Least Connections. No body required — strategy name comes from the path.
+order: 2000

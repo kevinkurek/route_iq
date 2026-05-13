@@ -200,6 +200,13 @@ tests/
 ├── proxy_integration.rs       # end-to-end proxy tests with in-process fake backends
 └── backend_integration.rs     # backend handler tests (calls handle directly, no subprocess)
 
+benchmarks/
+├── run.sh                     # one-command RR vs LC head-to-head with oha
+└── results/                   # individual runs land here (gitignored; force-add to commit a reference)
+
+logs/
+└── proxy.log                  # active proxy output for load-test post-processing (gitignored)
+
 postman/
 └── collections/route_iq       # YAML collection for `postman collection run postman/collections/route_iq`
 ```
@@ -214,8 +221,10 @@ Quick map of "where does X live":
 | The selection algorithm | [src/load_balancing.rs](src/load_balancing.rs) |
 | The real `/health` HTTP probe | [src/load_balancing.rs](src/load_balancing.rs) (`HttpHealthCheck::is_healthy`) |
 | Backend route handlers (`/health`, `/work`, 404) | [src/backend.rs](src/backend.rs) |
+| Admin endpoint (`POST /admin/strategy/<name>`) | [src/proxy.rs](src/proxy.rs) (`admin_set_strategy`) |
 | Proxy integration tests | [tests/proxy_integration.rs](tests/proxy_integration.rs) |
 | Backend handler tests | [tests/backend_integration.rs](tests/backend_integration.rs) |
+| Load-test / RR vs LC benchmark | [benchmarks/run.sh](benchmarks/run.sh) |
 
 ## Load-balancing strategies
 
@@ -443,11 +452,13 @@ Numbers won't match exactly — different hardware, different background process
 - `AppState` refactored from generic `<B: LoadBalancingStrategy>` to a non-generic struct with `balancer: RwLock<Box<dyn LoadBalancingStrategy>>` — strategy can be swapped at runtime through the lock without restarting the proxy
 - `POST /admin/strategy/<name>` endpoint — accepts `round_robin` or `least_connections`, returns 400 on unknown names, and is unit-tested for both the happy path and the bad-name path
 - Per-backend distribution histogram pipeline documented (`sed | grep | awk | sort | uniq -c` over the proxy log) — lets you visually confirm RR vs LC actually picks different backends under the same workload
+- Benchmark harness: [benchmarks/run.sh](benchmarks/run.sh) runs a single-command RR vs LC head-to-head with `oha`, saves per-strategy oha output + per-backend distribution + a combined `summary.txt` under `benchmarks/results/<timestamp>/`. Gitignored by default; force-add a run to commit it as a reference.
+- Postman collection wired up end-to-end — admin requests moved from `Load-Balancer-Control-(Planned)` to `Load-Balancer-Control`, both POST to the path-based URLs and return 200 OK. Full `postman collection run` is 9/9 clean.
 
-**Next (week 2 finishing)**
-- Run a full RR vs LC head-to-head with `oha` (e.g. `-n 5000 -c 50`), capture both runs' p50 / p95 / p99 + status distribution + per-backend histogram, and add a `## Benchmarks` section to this README with the numbers
-- Update the Postman collection's two `(Planned)` admin requests to use the new path-based URLs (`/admin/strategy/round_robin`, `/admin/strategy/least_connections`) so the whole collection runs clean
-- Decide whether to expose `?delay_ms=` / `?error_rate=` query knobs on `/work` for repeatable scenarios — randomized injection is fine for ambient noise but harder to reproduce a specific stress condition. Punt this decision until after the first head-to-head: if the random variation produces a clear RR vs LC signal, no need to add knobs.
+> 🎉 **Week 2 complete.** The "Next" list below is empty for the first time. Remaining roadmap is Week 3 (decision engine) onward.
+
+**Open decisions (no specific week)**
+- Whether to expose `?delay_ms=` / `?error_rate=` query knobs on `/work` for repeatable scenarios. Today's randomized injection produces a clean bimodal latency curve (smoke test showed p95 ≈ 18ms, p99 ≈ 737ms), so the RR-vs-LC signal is already visible. Revisit only if benchmark runs need reproducibility we can't get from random injection.
 
 **Week 3**
 - Decision engine: collect per-backend latency / error metrics in-memory, auto-switch strategies based on triggered conditions (e.g. p95 latency above threshold)

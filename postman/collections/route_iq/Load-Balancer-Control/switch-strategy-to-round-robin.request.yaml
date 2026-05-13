@@ -1,0 +1,6 @@
+$kind: http-request
+name: Switch Strategy to Round Robin
+method: POST
+url: 'http://{{proxy_host}}/admin/strategy/round_robin'
+description: Atomically swap the proxy's active load-balancing strategy to Round Robin. No body required — strategy name comes from the path.
+order: 1000
