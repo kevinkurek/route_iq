@@ -60,6 +60,16 @@ curl -i http://127.0.0.1:8080/work
 postman collection run postman/collections/route_iq
 ```
 
+### Swap load-balancing strategy at runtime
+
+```bash
+curl -X POST http://127.0.0.1:3000/admin/strategy/round_robin
+curl -X POST http://127.0.0.1:3000/admin/strategy/least_connections
+curl -X POST http://127.0.0.1:3000/admin/strategy/garbage     # → 400 Bad Request
+```
+
+No proxy restart needed. Subsequent `/work` requests will use the newly selected strategy.
+
 ### Run tests
 
 Tests are hermetic — they spawn their own in-process fake backends on ephemeral ports, so 8080–8083 don't need to be running.
@@ -224,12 +234,14 @@ Maintains an atomic counter; picks `healthy[counter % healthy.len()]`. Filters u
 ### Least Connections
 Scans all healthy backends and returns the one with the smallest `active_connections` counter. Counters are `AtomicU64`s on each `Backend`, incremented just before forwarding and decremented when the response returns.
 
-The `LoadBalancingStrategy` choice is currently set at startup in [src/main.rs](src/main.rs):
+The starting `LoadBalancingStrategy` is set at startup in [src/main.rs](src/main.rs):
 
 ```rust
-let state = Arc::new(AppState::new(RoundRobin::new(), backends));
-//                                  ^^^^^^^^^^^^^^^ swap to LeastConnections::new()
+let state = Arc::new(AppState::new(Box::new(RoundRobin::new()), backends));
+//                                          ^^^^^^^^^^^^^^^ swap to LeastConnections::new()
 ```
+
+After startup, the strategy can be swapped at runtime via `POST /admin/strategy/<name>` (see cheatsheet). The balancer lives behind a `RwLock<Box<dyn LoadBalancingStrategy>>` in `AppState`, so the swap is atomic — in-flight requests finish on the old strategy, new requests use the new one.
 
 ## Load testing with `oha`
 
@@ -290,7 +302,17 @@ What each block tells you:
 
 ### Comparing Round Robin vs Least Connections
 
-There's no runtime switch endpoint yet, so swap strategies by editing [src/main.rs](src/main.rs), rebuilding, and re-running the same `oha` command. Save both outputs and compare:
+Swap strategies between runs without restarting:
+
+```bash
+curl -X POST http://127.0.0.1:3000/admin/strategy/round_robin
+oha -n 5000 -c 50 http://127.0.0.1:3000/work        # capture this run
+
+curl -X POST http://127.0.0.1:3000/admin/strategy/least_connections
+oha -n 5000 -c 50 http://127.0.0.1:3000/work        # capture this run
+```
+
+Save both `oha` outputs and compare:
 
 | Metric | What to watch for |
 |--------|-------------------|
@@ -299,7 +321,38 @@ There's no runtime switch endpoint yet, so swap strategies by editing [src/main.
 | **p99** | **The headline number.** LC should meaningfully beat RR here when one backend is slow, because LC stops piling new requests onto a backend that's already stuck. |
 | **Status distribution** | Sanity check — same `/work` randomness, so similar 200/500/503 ratios across runs. |
 
-For a clean signal you'll want more volume than the smoke test — try `oha -n 5000 -c 50` and run with `RUST_LOG=route_iq=warn` so per-request tracing doesn't dominate the proxy's stdout.
+### Per-backend distribution histogram
+
+`oha` only sees the proxy's response, not which backend handled each request. To see the actual distribution, capture the proxy's tracing output and tally the `selected backend=` events:
+
+```bash
+# Launch the proxy with output captured to a file in the repo:
+RUST_LOG=route_iq=info ./target/debug/route_iq 2>&1 | tee logs/proxy.log
+
+# In another terminal, run your oha load test against the proxy, then:
+sed -E 's/\x1b\[[0-9;]*m//g' logs/proxy.log \
+  | grep "selected backend=" \
+  | awk -F'backend=' '{print $2}' \
+  | awk '{print $1}' \
+  | sort | uniq -c
+```
+
+The `logs/` directory is tracked (via `.gitkeep`) so anyone cloning the repo gets the folder. `logs/proxy.log` itself is gitignored — it's the active working file, overwritten every run. If you want to preserve a particular run for the repo, copy it to a named file (e.g. `cp logs/proxy.log logs/sample-rr-2026-05-13.log`) and commit that explicitly. Named samples are *not* gitignored.
+
+Sample output for a 1000-request run under Least Connections (note the `a` backend got fewer hits — LC was biasing away from it):
+
+```
+ 192 http://127.0.0.1:8080
+ 270 http://127.0.0.1:8081
+ 269 http://127.0.0.1:8082
+ 269 http://127.0.0.1:8083
+```
+
+Under pure Round Robin against equal backends you'd expect ~250/250/250/250. Deviation from that = the strategy doing its job.
+
+> 🪲 The `sed` step strips ANSI color codes that `tracing-subscriber` writes when stdout is connected to a terminal (via `tee`). To skip the `sed` step permanently, add `.with_ansi(false)` to the `tracing_subscriber::fmt()` builder in [src/main.rs](src/main.rs) — the log file will then be plain text on disk.
+
+For a clean signal you'll want more volume than the smoke test — try `oha -n 5000 -c 50` and run with `RUST_LOG=route_iq=info` so the `selected` events still land in the log file. Use `RUST_LOG=route_iq=warn` instead if you don't need the per-request distribution and just want quieter logs.
 
 ## Status & roadmap
 
@@ -317,10 +370,13 @@ For a clean signal you'll want more volume than the smoke test — try `oha -n 5
 - Per-request `#[tracing::instrument]` span on `proxy::handle` — events from `load_balancing` (probe, skip) and `proxy` (selected, close) all inherit `method` and `path` fields, so concurrent requests are no longer interleaved noise
 - Span close events emit `time.busy` / `time.idle` automatically via `FmtSpan::CLOSE` — per-request latency observability without any per-handler timing code
 - Load-test harness wired up with `oha` — smoke run confirmed against `/work`, README documents how to install, run, and interpret the output (percentiles, histogram, status distribution)
+- `AppState` refactored from generic `<B: LoadBalancingStrategy>` to a non-generic struct with `balancer: RwLock<Box<dyn LoadBalancingStrategy>>` — strategy can be swapped at runtime through the lock without restarting the proxy
+- `POST /admin/strategy/<name>` endpoint — accepts `round_robin` or `least_connections`, returns 400 on unknown names, and is unit-tested for both the happy path and the bad-name path
+- Per-backend distribution histogram pipeline documented (`sed | grep | awk | sort | uniq -c` over the proxy log) — lets you visually confirm RR vs LC actually picks different backends under the same workload
 
 **Next (week 2 finishing)**
-- `POST /admin/strategy` endpoint to swap strategies at runtime
-- Run a full RR vs LC head-to-head with `oha` (e.g. `-n 5000 -c 50`), capture both runs' p50 / p95 / p99 + status distribution, and add a `## Benchmarks` section to this README with the numbers
+- Run a full RR vs LC head-to-head with `oha` (e.g. `-n 5000 -c 50`), capture both runs' p50 / p95 / p99 + status distribution + per-backend histogram, and add a `## Benchmarks` section to this README with the numbers
+- Update the Postman collection's two `(Planned)` admin requests to use the new path-based URLs (`/admin/strategy/round_robin`, `/admin/strategy/least_connections`) so the whole collection runs clean
 - Decide whether to expose `?delay_ms=` / `?error_rate=` query knobs on `/work` for repeatable scenarios — randomized injection is fine for ambient noise but harder to reproduce a specific stress condition. Punt this decision until after the first head-to-head: if the random variation produces a clear RR vs LC signal, no need to add knobs.
 
 **Week 3**

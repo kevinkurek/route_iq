@@ -6,3 +6,7 @@
 
 # macOS
 .DS_Store
+
+# Active proxy log from load tests (overwritten on every run; commit named samples
+# like logs/sample-rr-2026-05-13.log manually if you want one in the repo).
+logs/proxy.log
