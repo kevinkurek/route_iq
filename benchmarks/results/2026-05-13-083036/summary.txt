@@ -1,0 +1,53 @@
+Benchmark run: 2026-05-13-083036
+Config: oha -n 5000 -c 50 --no-tui http://127.0.0.1:3000/work
+
+=== Round Robin (rr) ===
+Success rate:	100.00%
+Slowest:	1.9987 sec
+Fastest:	0.0084 sec
+Average:	0.0698 sec
+Requests/sec:	604.8731
+
+Percentiles:
+  50.00% in 0.0131 sec
+  90.00% in 0.0161 sec
+  95.00% in 0.2795 sec
+  99.00% in 1.6759 sec
+
+Status codes:
+[200] 4498 responses
+[500] 299 responses
+[503] 152 responses
+[504] 51 responses
+
+Per-backend selections:
+1250 http://127.0.0.1:8080
+1250 http://127.0.0.1:8081
+1250 http://127.0.0.1:8082
+1250 http://127.0.0.1:8083
+
+=== Least Connections (lc) ===
+Success rate:	100.00%
+Slowest:	1.9902 sec
+Fastest:	0.0085 sec
+Average:	0.0690 sec
+Requests/sec:	627.5105
+
+Percentiles:
+  50.00% in 0.0131 sec
+  90.00% in 0.0161 sec
+  95.00% in 0.3101 sec
+  99.00% in 1.5989 sec
+
+Status codes:
+[200] 4480 responses
+[500] 293 responses
+[503] 185 responses
+[504] 42 responses
+
+Per-backend selections:
+1402 http://127.0.0.1:8080
+1332 http://127.0.0.1:8081
+1373 http://127.0.0.1:8082
+ 893 http://127.0.0.1:8083
+

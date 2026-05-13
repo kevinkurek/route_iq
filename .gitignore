@@ -10,3 +10,8 @@
 # Active proxy log from load tests (overwritten on every run; commit named samples
 # like logs/sample-rr-2026-05-13.log manually if you want one in the repo).
 logs/proxy.log
+
+# Benchmark runs are noisy by default; keep the folder but ignore individual runs.
+# Force-add a specific run as the canonical reference: `git add -f benchmarks/results/<ts>`
+benchmarks/results/*
+!benchmarks/results/.gitkeep

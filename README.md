@@ -354,6 +354,76 @@ Under pure Round Robin against equal backends you'd expect ~250/250/250/250. Dev
 
 For a clean signal you'll want more volume than the smoke test — try `oha -n 5000 -c 50` and run with `RUST_LOG=route_iq=info` so the `selected` events still land in the log file. Use `RUST_LOG=route_iq=warn` instead if you don't need the per-request distribution and just want quieter logs.
 
+## Benchmarks
+
+The whole load-test-and-compare-strategies dance lives in one script: [benchmarks/run.sh](benchmarks/run.sh). One command, end-to-end.
+
+### How to run
+
+1. Start the stack with the proxy's stdout tee'd to `logs/proxy.log` (the script needs it for the per-backend histogram):
+
+   ```bash
+   PORT=8080 ./target/debug/backend &
+   PORT=8081 ./target/debug/backend &
+   PORT=8082 ./target/debug/backend &
+   PORT=8083 ./target/debug/backend &
+   RUST_LOG=route_iq=info ./target/debug/route_iq 2>&1 | tee logs/proxy.log
+   ```
+
+2. In another terminal, run the benchmark:
+
+   ```bash
+   ./benchmarks/run.sh
+   # or override the defaults (N=5000, C=50):
+   N=2000 C=20 ./benchmarks/run.sh
+   ```
+
+The script preflight-checks `oha`, the proxy, and `logs/proxy.log`, then:
+
+- Switches the proxy to **Round Robin** via `POST /admin/strategy/round_robin`
+- Runs `oha -n N -c C --no-tui` against `/work`, saving the full output
+- Tallies the per-backend distribution from `logs/proxy.log` (only this run's events)
+- Repeats for **Least Connections**
+- Prints a summary to stdout *and* `benchmarks/results/<timestamp>/summary.txt`
+
+### What gets saved
+
+```
+benchmarks/results/<timestamp>/
+├── rr-oha.txt                 # full oha output for Round Robin
+├── rr-distribution.txt        # per-backend selection counts (RR)
+├── lc-oha.txt                 # full oha output for Least Connections
+├── lc-distribution.txt        # per-backend selection counts (LC)
+└── summary.txt                # combined headline metrics
+```
+
+`benchmarks/results/` is **gitignored by default** so re-runs don't pollute `git status`. To preserve a particular run as the repo's canonical reference, force-add it:
+
+```bash
+git add -f benchmarks/results/<timestamp>
+git commit -m "benchmarks: <timestamp> RR vs LC reference run"
+```
+
+### Reading the comparison
+
+The headline metrics to look at, side by side:
+
+| Section | What to compare |
+|---------|-----------------|
+| **Percentiles (p50 / p95 / p99)** | p99 is where strategies diverge most. LC should beat RR if any backend is slower than the others. |
+| **Status codes** | Should be ~similar across both runs — same `/work` randomness exercising both. |
+| **Per-backend distribution** | RR ≈ flat (e.g. 1250/1250/1250/1250 for N=5000). LC will skew if backends drift in load. |
+
+### Reproducibility for someone cloning the repo
+
+If a committed reference run exists under `benchmarks/results/<timestamp>/`, anyone can:
+
+1. Clone, `cargo build`, start the stack as above.
+2. Run `./benchmarks/run.sh`.
+3. Diff their new run's `summary.txt` against the reference to see if their setup behaves the same.
+
+Numbers won't match exactly — different hardware, different background processes — but the *shape* (RR even, LC biased, similar status-code ratio) should reproduce.
+
 ## Status & roadmap
 
 **Done**
