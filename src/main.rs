@@ -29,7 +29,7 @@ async fn main() {
         Backend { addr: "http://127.0.0.1:8083".into(), id: "d".into(), active_connections: AtomicU64::new(0), healthy: true },
     ];
 
-    let state = Arc::new(AppState::new(RoundRobin::new(), backends));
+    let state = Arc::new(AppState::new(Box::new(RoundRobin::new()), backends));
 
     // probe health checks every 2 seconds
     let probe_state = Arc::clone(&state);

@@ -2,7 +2,7 @@
 
 use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 
-use hyper::{Body, Request, Response, Server, service::{make_service_fn, service_fn}};
+use hyper::{Body, Method, Request, Response, Server, service::{make_service_fn, service_fn}};
 use route_iq::{
     load_balancing::{Backend, LeastConnections, RoundRobin},
     proxy::{AppState, handle},
@@ -44,7 +44,7 @@ async fn proxy_forwards_request_and_releases_connection() {
     // Inject a single backend that points at the in-test fake server so
     // forwarding stays self-contained (no dependency on ports 8080-8083).
     let backends = make_backends(1, backend_addr);
-    let state = Arc::new(AppState::new(RoundRobin::new(), backends));
+    let state = Arc::new(AppState::new(Box::new(RoundRobin::new()), backends));
 
     // Create an HTTP request targeting the fake backend address.
     // The proxy handler will receive this request and forward it.
@@ -89,7 +89,7 @@ async fn proxy_round_robin_splits_in_flight_connections_across_backends() {
     // Four backends all pointing at the same slow fake; round robin will
     // rotate a -> b -> ... so per-index counters reflect distribution.
     let backends = make_backends(4, backend_addr);
-    let state = Arc::new(AppState::new(RoundRobin::new(), backends));
+    let state = Arc::new(AppState::new(Box::new(RoundRobin::new()), backends));
 
     // Build two requests so round robin gets called twice.
     let uri = format!("http://{}/rr", backend_addr);
@@ -152,7 +152,7 @@ async fn proxy_least_connections_prefers_lowest_in_flight_backends() {
     // Four backends all pointing at the same slow fake. We seed per-index
     // baseline load below so the LC strategy has something to choose between.
     let backends = make_backends(4, backend_addr);
-    let state = Arc::new(AppState::new(LeastConnections::new(), backends));
+    let state = Arc::new(AppState::new(Box::new(LeastConnections::new()), backends));
 
     // Seed baseline load so "a" is already busy and least-connections should prefer b/c first.
     {
@@ -212,6 +212,7 @@ async fn proxy_least_connections_prefers_lowest_in_flight_backends() {
     assert_eq!(backends[2].active_connections.load(Ordering::Relaxed), 1);
     assert_eq!(backends[3].active_connections.load(Ordering::Relaxed), 0);
 }
+
 #[tokio::test]
 async fn proxy_returns_503_when_all_backends_are_unhealthy() {
     // No fake server needed — when every backend is marked unhealthy, the
@@ -226,7 +227,7 @@ async fn proxy_returns_503_when_all_backends_are_unhealthy() {
         })
         .collect();
 
-    let state = Arc::new(AppState::new(RoundRobin::new(), backends));
+    let state = Arc::new(AppState::new(Box::new(RoundRobin::new()), backends));
 
     let req = Request::builder()
         .method("GET")
@@ -240,4 +241,47 @@ async fn proxy_returns_503_when_all_backends_are_unhealthy() {
     // Counters should not have been touched — pick_backend never returned Some.
     let backends = state.backends.lock().await;
     assert!(backends.iter().all(|b| b.active_connections.load(Ordering::Relaxed) == 0));
+}
+
+#[tokio::test]
+async fn admin_strategy_endpoint_swaps_balancer_at_runtime() {
+    // Start the proxy with RoundRobin. We don't need a real backend running
+    // for this test — the admin endpoint never forwards, it just mutates state.
+    // Point at port 1 (always unbound) just to give Backend a non-empty addr.
+    let backends = make_backends(2, "127.0.0.1:1".parse().unwrap());
+    let state = Arc::new(AppState::new(Box::new(RoundRobin::new()), backends));
+
+    // Sanity check: starting strategy is round_robin.
+    {
+        let b = state.balancer.read().await;
+        assert_eq!(b.name(), "round_robin");
+    }
+
+    // POST /admin/strategy/least_connections → should swap the strategy.
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/admin/strategy/least_connections")
+        .body(Body::empty())
+        .unwrap();
+    let resp = handle(req, Arc::clone(&state)).await.unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::OK);
+
+    // The balancer should now be the LC implementation.
+    {
+        let b = state.balancer.read().await;
+        assert_eq!(b.name(), "least_connections");
+    }
+
+    // POST with an unknown name → 400 Bad Request, strategy unchanged.
+    let bad = Request::builder()
+        .method(Method::POST)
+        .uri("/admin/strategy/not_a_real_strategy")
+        .body(Body::empty())
+        .unwrap();
+    let resp = handle(bad, Arc::clone(&state)).await.unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::BAD_REQUEST);
+
+    // Confirm the bad request did NOT overwrite the previous swap.
+    let b = state.balancer.read().await;
+    assert_eq!(b.name(), "least_connections");
 }
