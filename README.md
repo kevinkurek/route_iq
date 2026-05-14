@@ -188,9 +188,9 @@ client                proxy (:3000)                       backend (e.g. :8081)
 
 ```
 src/
-├── main.rs                    # proxy entry point: backend list, tracing init, probe loop, hyper Server on :3000
+├── main.rs                    # proxy entry point: backend list, tracing init, probe + decision-engine tasks, hyper Server on :3000
 ├── lib.rs                     # exports the modules below
-├── proxy.rs                   # AppState, handle() — the proxy request handler
+├── proxy.rs                   # AppState, handle(), Metrics — the proxy request handler + per-backend latency window
 ├── load_balancing.rs          # Backend struct, LoadBalancingStrategy trait, RR / LC impls, HttpHealthCheck
 ├── backend.rs                 # backend handlers: handle / health / work (reusable from tests + bin)
 └── bin/
@@ -222,6 +222,9 @@ Quick map of "where does X live":
 | The real `/health` HTTP probe | [src/load_balancing.rs](src/load_balancing.rs) (`HttpHealthCheck::is_healthy`) |
 | Backend route handlers (`/health`, `/work`, 404) | [src/backend.rs](src/backend.rs) |
 | Admin endpoint (`POST /admin/strategy/<name>`) | [src/proxy.rs](src/proxy.rs) (`admin_set_strategy`) |
+| Per-backend latency window (`Metrics`) | [src/proxy.rs](src/proxy.rs) (`Metrics`) |
+| Decision-engine tuning constants | [src/main.rs](src/main.rs) (top of file: `DECISION_TICK`, `SWAP_COOLDOWN`, `TRIGGER_PCT`, `TRIGGER_LATENCY`, `CALM_LATENCY`) |
+| Decision-engine loop itself | [src/main.rs](src/main.rs) (second `tokio::spawn` block) |
 | Proxy integration tests | [tests/proxy_integration.rs](tests/proxy_integration.rs) |
 | Backend handler tests | [tests/backend_integration.rs](tests/backend_integration.rs) |
 | Load-test / RR vs LC benchmark | [benchmarks/run.sh](benchmarks/run.sh) |
@@ -433,6 +436,76 @@ If a committed reference run exists under `benchmarks/results/<timestamp>/`, any
 
 Numbers won't match exactly — different hardware, different background processes — but the *shape* (RR even, LC biased, similar status-code ratio) should reproduce.
 
+## Adaptive strategy switching (decision engine)
+
+The proxy doesn't stay on whatever strategy you set at startup — a background task watches per-backend tail latency and **automatically swaps strategies when conditions warrant**, then swaps back when things calm down.
+
+### How it works
+
+A `tokio::spawn`'d task in [src/main.rs](src/main.rs) ticks every couple of seconds and:
+
+1. Looks at each backend's recent latency window (per-backend `Metrics` lives on `AppState`, populated by `proxy::handle` after every forward).
+2. Computes each backend's tail percentile (currently **p99**, configurable at the top of `main.rs`).
+3. If currently on **Round Robin** and **any** backend's p99 exceeds the trigger threshold → swap to **Least Connections**.
+4. If currently on **Least Connections** and **all** backends' p99 are below the calm threshold → swap back to **Round Robin**.
+5. A minimum cooldown between swaps prevents thrashing when latency is hovering near the threshold.
+
+### Configuration
+
+All tuning lives in named constants at the top of [src/main.rs](src/main.rs):
+
+```rust
+const DECISION_TICK: Duration = Duration::from_secs(2);         // how often the engine evaluates
+const SWAP_COOLDOWN: Duration = Duration::from_secs(10);        // min gap between consecutive swaps
+const TRIGGER_PCT:     f64 = 0.99;                              // which percentile drives the decision
+const TRIGGER_LATENCY: Duration = Duration::from_secs(1);       // p99 > 1s triggers RR → LC
+const CALM_LATENCY:    Duration = Duration::from_millis(200);   // p99 < 200ms triggers LC → RR
+```
+
+> These defaults are tuned for **interactive testing** — short windows so a 10-second `oha` burst produces a visible swap. For production-realistic behavior, bump `DECISION_TICK` to ~5s, `SWAP_COOLDOWN` to ~60s, and `Metrics::new()` in [src/proxy.rs](src/proxy.rs) from a 10s window to ~30s.
+
+### How to test it
+
+```bash
+# Terminal 1: stack with the log captured
+PORT=8080 ./target/debug/backend &
+PORT=8081 ./target/debug/backend &
+PORT=8082 ./target/debug/backend &
+PORT=8083 ./target/debug/backend &
+RUST_LOG=route_iq=info ./target/debug/route_iq 2>&1 | tee logs/proxy.log
+
+# Terminal 2: drive enough load to push p99 over 1s
+oha -n 2000 -c 20 --no-tui http://127.0.0.1:3000/work
+
+# Terminal 2 again — give the engine one more tick after oha finishes, then:
+sed -E 's/\x1b\[[0-9;]*m//g' logs/proxy.log | grep "decision engine: swap"
+```
+
+### What the swap looks like in the log
+
+```
+INFO route_iq: decision engine: swap from=round_robin to=least_connections
+```
+
+That's the headline event you want to see — the proxy noticed bad tail latency, swapped strategies, and logged the transition. If the load continues and conditions stay bad, the cooldown suppresses further swaps; once load drops and `all_calm` becomes true, a follow-up line announces the swap back:
+
+```
+INFO route_iq: decision engine: swap from=least_connections to=round_robin
+```
+
+### Diagnostics — per-tick visibility
+
+If a swap *doesn't* fire when you expected one, switch the log level to `debug` and look at the per-tick decision data:
+
+```bash
+pkill -f target/debug/route_iq
+RUST_LOG=route_iq=debug ./target/debug/route_iq 2>&1 | tee logs/proxy.log
+# ...drive load again, then:
+sed -E 's/\x1b\[[0-9;]*m//g' logs/proxy.log | grep "decision tick" | head
+```
+
+Each tick line shows the engine's view of the world — which backend is the slowest, that backend's current p99, whether `all_calm` is true, and which percentile is in use. Silence is never ambiguous: even when no swap is warranted, you can see *why*.
+
 ## Status & roadmap
 
 **Done**
@@ -454,15 +527,16 @@ Numbers won't match exactly — different hardware, different background process
 - Per-backend distribution histogram pipeline documented (`sed | grep | awk | sort | uniq -c` over the proxy log) — lets you visually confirm RR vs LC actually picks different backends under the same workload
 - Benchmark harness: [benchmarks/run.sh](benchmarks/run.sh) runs a single-command RR vs LC head-to-head with `oha`, saves per-strategy oha output + per-backend distribution + a combined `summary.txt` under `benchmarks/results/<timestamp>/`. Gitignored by default; force-add a run to commit it as a reference.
 - Postman collection wired up end-to-end — admin requests moved from `Load-Balancer-Control-(Planned)` to `Load-Balancer-Control`, both POST to the path-based URLs and return 200 OK. Full `postman collection run` is 9/9 clean.
+- Per-backend `Metrics` (sliding-window `VecDeque<Sample>` with `record(latency)` + `percentile(p)`) — built once at startup, keyed by backend id, recorded into by `proxy::handle` after every forward. Unit-tested for known-sample percentiles + empty-window behavior.
+- Decision engine background task — ticks every `DECISION_TICK`, computes per-backend tail latency, swaps RR → LC when any backend exceeds `TRIGGER_LATENCY` at p99, swaps LC → RR when all backends fall under `CALM_LATENCY`. Logs each swap at info level; per-tick state visible at debug level.
+- Swap rate-limiting via `SWAP_COOLDOWN` — guarantees at most one strategy change per cooldown window (project spec requirement). Suppressed swaps log with `cooldown_remaining`.
 
-> 🎉 **Week 2 complete.** The "Next" list below is empty for the first time. Remaining roadmap is Week 3 (decision engine) onward.
+> 🎉 **Week 2 + Week 3 complete.** The decision engine is in, p99-driven, cooldown-respecting, observable end-to-end. Remaining work is Week 4+ polish and stretch directions.
 
 **Open decisions (no specific week)**
 - Whether to expose `?delay_ms=` / `?error_rate=` query knobs on `/work` for repeatable scenarios. Today's randomized injection produces a clean bimodal latency curve (smoke test showed p95 ≈ 18ms, p99 ≈ 737ms), so the RR-vs-LC signal is already visible. Revisit only if benchmark runs need reproducibility we can't get from random injection.
-
-**Week 3**
-- Decision engine: collect per-backend latency / error metrics in-memory, auto-switch strategies based on triggered conditions (e.g. p95 latency above threshold)
-- Rate-limit algorithm switches (at most one per 60s window)
+- Whether to track per-backend **error rate** alongside latency as a second trigger condition. Current engine acts only on tail latency; a backend that returns lots of 5xx but stays fast wouldn't currently trigger a swap. Easy to add — extend `Metrics` with an error counter and an `error_rate()` method.
+- Whether to bump the testing-tuned constants in `main.rs` / `Metrics::new()` back up to production-realistic values (30s window, 5s tick, 60s cooldown). The mechanic works; the values are tuned short for fast iteration.
 
 **Optional / week 4+**
 - External observability (Datadog, etc.)

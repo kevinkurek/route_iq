@@ -5,7 +5,7 @@
 //
 // See README "Request lifecycle" for the end-to-end diagram.
 
-use std::sync::Arc;
+use std::{collections::{HashMap, VecDeque}, sync::Arc, time::{Duration, Instant}};
 use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 use std::sync::atomic::Ordering;
@@ -14,20 +14,76 @@ use hyper::{Body, Client, Method, Request, Response, StatusCode};
 
 use crate::load_balancing::{Backend, HttpHealthCheck, LeastConnections, LoadBalancingStrategy, RoundRobin};
 
+pub struct Sample {
+    at: Instant,
+    latency: Duration,
+}
+
+pub struct Metrics {
+    samples: VecDeque<Sample>,
+    window: Duration,
+}
+
+impl Metrics {
+    pub fn new() -> Self {
+        // Window tuned for interactive testing — short bursts of oha load.
+        // Bump up (e.g. 30s) for production-realistic smoothing.
+        Self {
+            samples: VecDeque::new(),
+            window: Duration::from_secs(10),
+        }
+    }
+
+    pub fn record(&mut self, latency: Duration) {
+        let now = Instant::now();
+        self.samples.push_back(Sample { at: now, latency });
+
+        // Drop anything older than the window. Cheap — front-only pops until
+        // we hit a sample still inside the window.
+        let cutoff = now - self.window;
+        while let Some(front) = self.samples.front() {
+            if front.at < cutoff {
+                self.samples.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn percentile(&self, p: f64) -> Option<Duration> {
+        if self.samples.is_empty() {return None;}
+        let mut latencies: Vec<Duration> = self.samples.iter().map(|s| s.latency).collect();
+        latencies.sort();
+        let idx = ((latencies.len() as f64) * p).floor() as usize;
+        latencies.get(idx).copied()
+    }
+}
+
 pub struct AppState {
     pub backends: Mutex<Vec<Backend>>,
     pub balancer: RwLock<Box<dyn LoadBalancingStrategy>>, // required for POST /admin/strategy
     pub checker: HttpHealthCheck,
-    pub client: Client<hyper::client::HttpConnector>
+    pub client: Client<hyper::client::HttpConnector>,
+    pub metrics: HashMap<String, Mutex<Metrics>>, // HashMap<backendId, Metrics> for p95 latency checks
 }
 
 impl AppState {
-    pub fn new(balancer: Box<dyn LoadBalancingStrategy>, backends: Vec<Backend>) -> Self {
+    pub fn new(
+        balancer: Box<dyn LoadBalancingStrategy>,
+        backends: Vec<Backend>,
+    ) -> Self {
+        // One Metrics entry per backend, keyed by id.
+        let metrics: HashMap<String, Mutex<Metrics>> = backends
+            .iter()
+            .map(|b| (b.id.clone(), Mutex::new(Metrics::new())))
+            .collect();
+
         Self {
             backends: Mutex::new(backends),
             balancer: RwLock::new(balancer),
             checker: HttpHealthCheck,
             client: Client::new(),
+            metrics,
         }
     }
 }
@@ -71,6 +127,8 @@ pub async fn handle(
     if req.method() == Method::POST && req.uri().path().starts_with("/admin/strategy/"){
         return admin_set_strategy(req, state).await;
     }
+
+    let request_start = Instant::now(); // start the timer
 
     let (selected_backend_addr, selected_backend_id) = {
 
@@ -122,5 +180,34 @@ pub async fn handle(
             b.active_connections.fetch_sub(1, Ordering::Relaxed);
         }
     }
+
+    // record latency for the backend we used
+    if let Some(metrics) = state.metrics.get(&selected_backend_id) {
+        metrics.lock().await.record(request_start.elapsed());
+    }
+
     result
+}
+
+
+// create testing
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percentile_of_known_samples() {
+        let mut m = Metrics::new();
+        for ms in [10, 20, 30, 40, 50, 60, 70, 80, 90, 100] {
+            m.record(Duration::from_millis(ms));
+        }
+
+        // 10 samples, p95 → index floor(10 * 0.95) = 9 → 100ms
+        assert_eq!(m.percentile(0.95), Some(Duration::from_millis(100)));
+        // p50 → index 5 → 60ms
+        assert_eq!(m.percentile(0.50), Some(Duration::from_millis(60)));
+        // empty case
+        let empty = Metrics::new();
+        assert_eq!(empty.percentile(0.95), None);
+    }
 }
